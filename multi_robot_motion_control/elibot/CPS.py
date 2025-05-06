@@ -9,6 +9,32 @@ from scipy.spatial.transform import Rotation as R
 import traceback  # 导入 traceback 模块
 
 
+def desire_left_pose(rpy_array=None):
+    # 计算 inv(rpy = (65, 0, 10)) @ rpy = (180, 0, 0)
+    if rpy_array is None:
+        rpy_array = [180, 0, 180]
+    rpy_inv_65_0_10 = R.from_euler('xyz', [65, 4, 12], degrees=True).inv()
+    rpy = R.from_euler('xyz', rpy_array, degrees=True)
+
+    # 计算旋转矩阵
+    result_inv = rpy_inv_65_0_10.as_matrix() @ rpy.as_matrix()
+    rpy_angles = R.from_matrix(result_inv).as_euler('xyz', degrees=True)
+    return rpy_angles
+
+
+def desire_right_pose(rpy_array=None):
+    # 计算 inv(rpy = (65, 0, 10)) @ rpy = (180, 0, 0)
+    if rpy_array is None:
+        rpy_array = [180, 0, 180]
+    rpy_inv_65_0_10 = R.from_euler('xyz', [-65, 0, -10], degrees=True).inv()
+    rpy = R.from_euler('xyz', rpy_array, degrees=True)
+
+    # 计算旋转矩阵
+    result_inv = rpy_inv_65_0_10.as_matrix() @ rpy.as_matrix()
+    rpy_angles = R.from_matrix(result_inv).as_euler('xyz', degrees=True)
+    return rpy_angles
+
+
 class CPSClient:
     """
     此类用于通过TCP/IP控制Elibot机器人，并通过TCI接口与Jodell夹爪通信。
@@ -440,14 +466,14 @@ class CPSClient:
             print(f"发送 MoveByJoint 指令失败: {err_msg}")
             return False
 
-    def moveBySpeedl(self, speed_l, acc, arot, t, id=1):
+    def moveBySpeedl(self, speed_l, acc, arot, t, id=-1):
         # ... (代码保持不变) ...
-        print(f"--- 开始速度控制运动 MoveBySpeedl ---")
-        print(f"速度向量: {speed_l}, 线性加速度: {acc}, 旋转加速度: {arot}, 持续时间: {t}")
+        # print(f"--- 开始速度控制运动 MoveBySpeedl ---")
+        # print(f"速度向量: {speed_l}, 线性加速度: {acc}, 旋转加速度: {arot}, 持续时间: {t}")
         params = {"v": speed_l, "acc": acc, "arot": arot, "t": t}
-        print("发送 MoveBySpeedl 指令...")
+        # print("发送 MoveBySpeedl 指令...")
         ret, result, ret_id = self.sendCMD("moveBySpeedl", params, id)
-        print(f"MoveBySpeedl 指令回复: ret={ret}, result={result}, id={ret_id}")
+        # print(f"MoveBySpeedl 指令回复: ret={ret}, result={result}, id={ret_id}")
         if not ret:
             err_msg = result.get('message', str(result)) if isinstance(result, dict) else str(result)
             print(f"发送 MoveBySpeedl 指令失败: {err_msg}")
@@ -481,6 +507,83 @@ class CPSClient:
         else:
             print(f"发送 inverseKinematic 指令失败: {iK_joint_str}")
             return None
+
+    def setCurrentCoord(self, coord_mode):
+        """
+        指定后续运动或操作所参考的坐标系。
+
+        Args:
+            sock: 与机器人控制器建立的 socket 连接对象。
+            coord_mode (int): 要设置的坐标系编号，范围 [0, 4]。
+                0: 关节 (Joint) 坐标系
+                1: 基座 (Base) 坐标系
+                2: 工具 (Tool) 坐标系
+                3: 用户 (User) 坐标系
+                4: 圆柱 (Cylinder) 坐标系
+
+        Returns:
+            tuple: 一个包含三个元素的元组:
+                - success (bool): 命令是否成功发送并被控制器确认。
+                - result: 控制器返回的结果字段 (对于此命令通常是布尔值 True/False)。
+                - id: 本次 JSON-RPC 请求的 ID。
+
+        Raises:
+            ValueError: 如果 coord_mode 不是 0 到 4 之间的整数。
+
+        Note:
+            本命令只支持在 remote 模式下使用。
+
+        JSON-RPC Method: setCurrentCoord
+        JSON-RPC Params: {"coord_mode": coord_mode}
+        """
+        # 输入验证
+        if not isinstance(coord_mode, int) or not (0 <= coord_mode <= 4):
+            raise ValueError(f"无效的 coord_mode: {coord_mode}。必须是 0 到 4 之间的整数。")
+
+        params = {"coord_mode": coord_mode}
+
+        # 调用核心的 sendCMD 函数
+        success, result, req_id = self.sendCMD("setCurrentCoord", params)
+
+        return success, result, req_id
+
+    def jog(self, index, speed=None):
+        """
+        发送 JOG 命令给机器人，使其沿指定方向持续运动。
+
+        注意：
+        1. 此命令需要持续发送才能维持运动，停止发送超过1秒，机器人将停止jog。
+        2. 要使机器人在命令流结束后立即停止，必须显式调用 stop() 命令。
+        3. 本命令只支持在 remote 模式下使用。
+
+        Args:
+            sock: 与机器人控制器建立的 socket 连接对象。
+            index (int): 指定运动的轴或坐标系方向编号，范围 [0, 11]。
+            speed (float, optional): 手动速度百分比，范围 [0.05, 100.0]。
+                                     如果省略或为 None，控制器可能使用默认速度。
+                                     默认为 None。
+
+        Returns:
+            tuple: 一个包含三个元素的元组:
+                - success (bool): 命令是否成功发送并被控制器确认。
+                - result: 控制器返回的结果字段 (对于 jog 通常是布尔值 true/false)。
+                - id: 本次 JSON-RPC 请求的 ID。
+
+        JSON-RPC Method: jog
+        JSON-RPC Params: {"index": index, "speed": speed (如果提供)}
+        """
+        params = {"index": index}
+        if speed is not None:
+            # 可选：添加对 speed 范围的校验
+            if not (0.05 <= speed <= 100.0):
+                # 可以选择抛出异常或打印警告
+                print(f"警告: jog 速度 {speed} 超出有效范围 [0.05, 100.0]。")
+                # raise ValueError("Speed must be between 0.05 and 100.0")
+            params["speed"] = speed
+        self.setCurrentCoord(coord_mode=2)
+        # 调用已有的 sendCMD 函数发送命令
+        success, result, req_id = self.sendCMD("jog", params)
+        return success, result, req_id
 
     def move_robot(self, target_pose, speed=10, block=True):
         # ... (代码保持不变) ...
@@ -948,10 +1051,8 @@ def desire_right_pose(rpy_array=None):
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    robot_ip = "192.168.188.200"
-    gripper_id = 9  # <<< 确认你的夹爪ID
-    print(f"--- 脚本开始: 准备连接机器人 {robot_ip} ---")
-    controller = CPSClient(robot_ip, gripper_slave_id=gripper_id)
+    robot_ip = "192.168.10.8"
+    controller = CPSClient(robot_ip, )
 
     try:
         print("\n[步骤 1/6] 正在连接机器人...")
@@ -960,8 +1061,11 @@ if __name__ == "__main__":
 
             print("\n[步骤 2/6] 正在初始化机器人...")
             # ... (机器人上电、清报警、电机同步、伺服使能等保持不变) ...
-            if not controller.power_on(): exit()
-            controller.clearAlarm()
+            # if not controller.power_on(): exit()
+            # controller.clearAlarm()
+            suc, result, req_id = controller.jog(index=11, speed=100)  # X轴负方向
+            time.sleep(10)
+            exit()
             if not controller.setMotorStatus(): print("警告: 同步电机状态失败")
             if not controller.set_servo(1): exit()
             print("机器人初始化完成。")

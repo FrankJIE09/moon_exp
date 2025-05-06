@@ -1,0 +1,98 @@
+# v3: 双臂控制配置文件 (带模式切换, WAV 语音, 回正模式)
+
+# 环境和机器人设置
+setup:
+  font_path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc" # !请根据你的系统修改!
+  left_robot_ip: "192.168.188.200"
+  right_robot_ip: "192.168.188.201"
+  left_gripper_id: 9
+  right_gripper_id: 9
+  window_width: 800
+  window_height: 400
+  font_size: 18
+
+# --- 新增: 音频文件路径映射 ---
+audio_files:
+  # 将下面的路径修改为你实际的 .wav 文件路径
+  # 建议将文件放在脚本目录下的 audio 子文件夹中
+  xyz_mode: "audio/xyz_mode.wav"
+  rpy_mode: "audio/rpy_mode.wav"
+  vision_enter: "audio/vision_enter.wav"
+  vision_exit: "audio/vision_exit.wav"
+  left_open: "audio/left_open.wav"
+  left_close: "audio/left_close.wav"
+  right_open: "audio/right_open.wav"
+  right_close: "audio/right_close.wav"
+  gripper_inactive: "audio/gripper_inactive.wav"
+  system_ready: "audio/system_ready.wav" # 例如: 系统准备就绪
+  # 新增回正模式语音
+  reset_mode: "audio/reset_mode.wav" # 回正模式语音文件
+  left_reset_fail: "audio/left_reset_fail.wav" # 左臂回正失败语音文件
+  right_reset_fail: "audio/right_reset_fail.wav" # 右臂回正失败语音文件
+
+
+# 手柄控制配置文件
+controls:
+  # ... (保持之前的 controls 部分不变) ...
+  # --- Movement Controls ---
+  xyz_left_arm_x_pos: { type: hat, index: 0, axis: y, direction: -1 }
+  xyz_left_arm_x_neg: { type: hat, index: 0, axis: y, direction: 1 }
+  xyz_left_arm_y_pos: { type: hat, index: 0, axis: x, direction: 1 }
+  xyz_left_arm_y_neg: { type: hat, index: 0, axis: x, direction: -1 }
+  xyz_left_arm_z_pos: { type: button, index: 6 } # LB
+  xyz_left_arm_z_neg: { type: axis, index: 5, threshold: 0.1, direction: 1 } # LT
+
+  xyz_right_arm_x_pos:  { type: button, index: 4 } # Y
+  xyz_right_arm_x_neg: { type: button, index: 0 } # A
+  xyz_right_arm_y_pos: { type: button, index: 3 } # X
+  xyz_right_arm_y_neg: { type: button, index: 1 } # B
+  xyz_right_arm_z_pos: { type: button, index: 7 } # RB
+  xyz_right_arm_z_neg: { type: axis, index: 4, threshold: 0.1, direction: 1 } # RT
+
+  rpy_left_arm_roll_pos: { type: hat, index: 0, axis: x, direction: 1 }
+  rpy_left_arm_roll_neg: { type: hat, index: 0, axis: x, direction: -1 }
+  rpy_left_arm_pitch_pos: { type: hat, index: 0, axis: y, direction: 1 }
+  rpy_left_arm_pitch_neg: { type: hat, index: 0, axis: y, direction: -1 }
+  rpy_left_arm_yaw_pos: { type: button, index: 6 } # LB
+  rpy_left_arm_yaw_neg: { type: axis, index: 5, threshold: 0.1, direction: 1 } # LT
+
+  rpy_right_arm_roll_pos: { type: button, index: 4 } # B
+  rpy_right_arm_roll_neg: { type: button, index: 0 } # A
+  rpy_right_arm_pitch_pos: { type: button, index: 3 } # Y
+  rpy_right_arm_pitch_neg: { type: button, index: 1 } # X
+  rpy_right_arm_yaw_pos: { type: button, index: 7 } # RB
+  rpy_right_arm_yaw_neg: { type: axis, index: 4, threshold: 0.1, direction: 1 } # RT
+
+  # --- Shared Controls (All Modes) ---
+  gripper_toggle_left: { type: button, index: 13 }  # R3
+  gripper_toggle_right: { type: button, index: 14 } # Guide (可能无效!)
+  speed_decrease: { type: button, index: 10 } # Back 按钮 减速
+  speed_increase_alt: { type: button, index: 11 } # Back 按钮 减速
+
+  # --- Mode Switching ---
+  mode_switch_button: { type: button, index: 12 } # Start 按钮
+
+  # --- 新增: 回正模式控制 ---
+  # !请根据你的手柄修改下面的 index!
+  reset_left_arm: { type: button, index: 3 } # 例如: X 按钮
+  reset_right_arm: { type: button, index: 1 } # 例如: B 按钮
+
+
+# 速度和通用设置
+settings:
+  # ... (保持之前的 settings 部分不变) ...
+  initial_xy_speed: 40.0
+  initial_z_speed: 30.0
+  rpy_speed: 20.0
+  speed_increment: 5.0
+  min_speed: 5.0
+  max_speed: 100.0
+  long_press_duration: 0.8
+  acc: 100
+  arot: 10
+  t: 0.1
+  trigger_threshold: 0.1
+  gripper_speed: 150
+  gripper_force: 100
+  # 新增回正模式速度 (可以使用 moveByJoint，这里只用于 jog 的默认速度映射，如果需要)
+  reset_speed: 50 # 回正运动的速度
