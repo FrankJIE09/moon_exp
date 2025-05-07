@@ -9,7 +9,7 @@ import os
 import yaml
 
 # -- 配置文件路径 --
-CONFIG_FILE = 'config.yaml'
+CONFIG_FILE = '../config.yaml'
 
 # -- 全局变量 (将被配置文件覆盖或使用默认值) --
 FONT_PATH = None  # 将从 config 读取

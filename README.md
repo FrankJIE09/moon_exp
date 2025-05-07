@@ -34,7 +34,7 @@
 
 * **增加速度:** **Back / Select 按钮** (Button 6) - *注意：这与常见的 Start 加速相反*
 * **减少速度:** **Button 11** - **警告：标准 Xbox 手柄通常没有 Button 11！** 你需要修改 `config.yaml`，将 `speed_decrease` 映射到一个实际存在的按钮。
-![gripper.png](gripper.png)
+![gripper.png](backup/gripper.png)
 **程序退出 (Exit):**
 
 * **Start 按钮** (Button 7) - *根据 `config.yaml` 中的 `quit_button` 设置*

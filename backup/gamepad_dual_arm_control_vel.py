@@ -9,7 +9,7 @@ import os
 import yaml
 
 # -- 配置文件路径 --
-CONFIG_FILE = 'config.yaml'
+CONFIG_FILE = '../config.yaml'
 
 # -- 全局变量 (将被配置文件覆盖或使用默认值) --
 FONT_PATH = None; LEFT_ROBOT_IP = "127.0.0.1"; RIGHT_ROBOT_IP = "127.0.0.1"

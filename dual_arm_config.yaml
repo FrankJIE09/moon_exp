@@ -18,21 +18,28 @@ audio_files:
   xyz_mode: "audio/xyz_mode.wav"
   rpy_mode: "audio/rpy_mode.wav"
   vision_enter: "audio/vision_enter.wav"
-  vision_exit: "audio/vision_exit.wav"
+  vision_exit: "audio/vision_exit.wav" # 虽然代码没直接用 exit，但保留以备将来使用
   left_open: "audio/left_open.wav"
   left_close: "audio/left_close.wav"
   right_open: "audio/right_open.wav"
   right_close: "audio/right_close.wav"
   gripper_inactive: "audio/gripper_inactive.wav"
-  system_ready: "audio/system_ready.wav" # 例如: 系统准备就绪
-  # 新增回正模式语音
-  reset_mode: "audio/reset_mode.wav" # 回正模式语音文件
-  left_reset_fail: "audio/left_reset_fail.wav" # 左臂回正失败语音文件
-  right_reset_fail: "audio/right_reset_fail.wav" # 右臂回正失败语音文件
+  system_ready: "audio/system_ready.wav"
+  reset_mode: "audio/reset_mode.wav"
+  # 回正成功/失败的语音反馈
+  left_reset_success: "audio/left_reset_success.wav"   # (新增) 左臂回正成功语音
+  left_reset_fail: "audio/left_reset_fail.wav"
+  right_reset_success: "audio/right_reset_success.wav" # (新增) 右臂回正成功语音
+  right_reset_fail: "audio/right_reset_fail.wav"
 
 
 # 手柄控制配置文件
 controls:
+  # --- Vision Mode Specific Controls ---
+  vision_start_record: { type: button, index: 3 } # 示例: 手柄 X 键 (Pygame 通常按钮索引 2)
+  vision_stop_record_confirm: { type: button, index: 4 } # 示例: 手柄 Y 键 (Pygame 通常按钮索引 3)
+  vision_cancel_record: { type: button, index: 0 } # 示例: 手柄 A 键 (Pygame 通常按钮索引 0)
+
   # ... (保持之前的 controls 部分不变) ...
   # --- Movement Controls ---
   xyz_left_arm_x_pos: { type: hat, index: 0, axis: y, direction: -1 }
