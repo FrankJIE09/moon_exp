@@ -171,6 +171,7 @@ def send_audio_and_receive_response(audio_filepath):
             filesize = os.path.getsize(audio_filepath)
             filename = os.path.basename(audio_filepath)
             metadata = f"{filename}:{filesize}\n"  # 使用换行符分隔元数据和文件内容
+            time.sleep(0.1)
             s.sendall(metadata.encode())
             print(f"[VISION_INTERACTION] Sent metadata: {metadata.strip()}")
 
