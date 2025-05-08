@@ -1,188 +1,280 @@
-# mock_audio_server.py
+# mock_audio_server.py (Rewritten with type hints and updated JSON)
 # -*- coding: utf-8 -*-
+
+"""
+模拟音频服务器，用于测试 vision_interaction.py 客户端。
+接收客户端发送的音频文件，并返回一个预设的默认音频文件和
+一个预设的、符合抓取指令格式的 JSON 响应。
+"""
 
 import socket
 import json
 import os
 import time
+import traceback
+from typing import Tuple, Optional, Dict, Any
 
-SERVER_HOST = "127.0.0.1"  # 监听所有可用接口
-SERVER_PORT = 12345  # 与 vision_interaction.py 中的端口匹配
-RECEIVED_AUDIO_DIR = "received_from_client"  # 可选: 保存客户端音频的目录
-DEFAULT_RESPONSE_AUDIO_PATH = "default_server_response.wav"  # 预设的响应音频
-BUFFER_SIZE = 4096
+# --- 配置常量 ---
+SERVER_HOST: str = "0.0.0.0"  # 监听所有可用接口
+SERVER_PORT: int = 12345  # 端口号
+RECEIVED_AUDIO_DIR: str = "received_from_client"  # 保存接收音频的目录
+DEFAULT_RESPONSE_AUDIO_PATH: str = "default_server_response.wav"  # 默认响应音频路径
+BUFFER_SIZE: int = 4096  # Socket 缓冲区大小
+MAX_METADATA_LENGTH: int = 1024  # 最大元数据长度 (防止攻击)
+SOCKET_TIMEOUT: float = 60.0  # 客户端连接和数据传输的超时时间 (秒)
 
 
-def create_default_response_json():
-    """创建一个默认的JSON响应"""
+def create_default_response_json() -> Dict[str, Any]:
+    """
+    创建一个符合视觉抓取指令格式的默认JSON响应。
+    """
     return {
-        "action": "grasp",
-        "target": "default_object_id_123",
-        "status": "success",
-        "message": "This is a default response from the mock server.",
-        "confidence": 0.95,
-        "timestamp": time.time()
+        "action": "grasp",  # 指令类型为抓取
+        "target": {
+            "id": "default_mock_object",  # 目标物体ID (可修改)
+            # !! 注意: 这里的坐标需要根据你的实际测试场景调整 !!
+            # 例如，一个可能在机器人工作空间内的坐标 (单位: 毫米)
+            "base_coordinates_mm": [300.0, 50.0, 100.0],
+            # 可选: 物体姿态 (RPY, 度) - 如果不需要可以省略或设为 None
+            "orientation_rpy_deg": [0.0, 0.0, 45.0],
+            # 指定哪个手臂执行抓取
+            "arm_choice": "left"  # 或 "right"
+        },
+        "status": "success",  # 指令状态
+        "message": "Default grasp command from mock server.",  # 附加信息
+        "confidence": 0.99,  # 模拟置信度
+        "timestamp": time.time()  # 时间戳
     }
 
 
-def handle_client(conn, addr):
-    print(f"[Server] Accepted connection from {addr}")
+def handle_client(conn: socket.socket, addr: Tuple[str, int]):
+    """处理单个客户端连接：接收音频，发送默认响应。"""
+    print(f"\n[Server] Accepted connection from {addr}")
+    conn.settimeout(SOCKET_TIMEOUT)  # 为此连接设置超时
+
     try:
         # 1. 接收音频元数据 (文件名:大小\n)
-        metadata_bytes = b''
-        while not metadata_bytes.endswith(b'\n'):  # 读取直到换行符
+        metadata_buffer = b''
+        metadata_str: Optional[str] = None
+        print(f"[Server] Waiting for metadata from {addr} (Timeout: {SOCKET_TIMEOUT}s)...")
+
+        while True:
+            if b'\n' in metadata_buffer:
+                metadata_part, rest_of_buffer = metadata_buffer.split(b'\n', 1)
+                try:
+                    metadata_str = metadata_part.decode()
+                    metadata_buffer = rest_of_buffer  # Keep remainder for file content
+                    break
+                except UnicodeDecodeError:
+                    print(f"[Server] Error: Could not decode metadata from {addr}. Assuming binary data.")
+                    # Handle as if no valid metadata was received? Or close? Let's close.
+                    metadata_str = None
+                    break  # Exit loop, metadata_str will be None
+
+            if len(metadata_buffer) >= MAX_METADATA_LENGTH:
+                print(
+                    f"[Server] Error: Metadata limit ({MAX_METADATA_LENGTH} bytes) exceeded or no newline from {addr}.")
+                return  # Close connection
+
             chunk = conn.recv(BUFFER_SIZE)
             if not chunk:
-                print(f"[Server] Client {addr} disconnected before sending metadata.")
+                print(f"[Server] Client {addr} disconnected while sending metadata.")
                 return
-            metadata_bytes += chunk
+            metadata_buffer += chunk
 
-        metadata_str = metadata_bytes.decode().strip()
-        print(f"[Server] Received metadata: '{metadata_str}'")
+        if metadata_str is None:
+            print(f"[Server] Failed to receive valid metadata from {addr}. Closing connection.")
+            return
 
+        print(f"[Server] Received raw metadata string: '{metadata_str}'")
+
+        # --- 解析元数据 ---
         try:
             client_audio_filename, client_audio_filesize_str = metadata_str.split(':')
             client_audio_filesize = int(client_audio_filesize_str)
+            # Sanitize filename slightly
+            client_audio_filename = os.path.basename(client_audio_filename.replace('../', ''))
+            if not client_audio_filename: client_audio_filename = "unknown_client_audio.wav"
         except ValueError:
-            print(f"[Server] Invalid metadata format from {addr}. Closing connection.")
-            conn.sendall(b"ERROR: Invalid metadata format.\n")  # 可选的错误回复
+            print(f"[Server] Invalid metadata format '{metadata_str}' from {addr}. Closing connection.")
+            # Optionally send error back: conn.sendall(b"ERROR: Invalid metadata.\n")
             return
 
-        print(
-            f"[Server] Expecting audio file '{client_audio_filename}' of size {client_audio_filesize} bytes from {addr}")
+        print(f"[Server] Expecting '{client_audio_filename}' ({client_audio_filesize} bytes) from {addr}")
+        if client_audio_filesize < 0 or client_audio_filesize > 100 * 1024 * 1024:  # Sanity check size (e.g., < 100MB)
+            print(f"[Server] Error: Unreasonable audio filesize ({client_audio_filesize}) from {addr}. Closing.")
+            return
 
-        # (可选) 创建目录保存接收到的音频
+        # --- (可选) 保存接收到的音频 ---
         if not os.path.exists(RECEIVED_AUDIO_DIR):
-            os.makedirs(RECEIVED_AUDIO_DIR)
+            try:
+                os.makedirs(RECEIVED_AUDIO_DIR)
+            except OSError as e:
+                print(f"[Server] Warning: Could not create directory '{RECEIVED_AUDIO_DIR}': {e}")
 
-        # 为避免文件名冲突，可以加上时间戳或客户端地址
-        # received_filepath = os.path.join(RECEIVED_AUDIO_DIR, f"{addr[0]}_{addr[1]}_{client_audio_filename}")
-        received_filepath = os.path.join(RECEIVED_AUDIO_DIR,
-                                         f"client_{time.strftime('%Y%m%d%H%M%S')}_{client_audio_filename}")
+        # Create unique filename for saving
+        received_filename = f"client_{addr[0]}_{addr[1]}_{time.strftime('%Y%m%d%H%M%S')}_{client_audio_filename}"
+        received_filepath = os.path.join(RECEIVED_AUDIO_DIR, received_filename) if os.path.exists(
+            RECEIVED_AUDIO_DIR) else None
 
-        # 2. 接收音频文件内容
-        bytes_received = 0
-        with open(received_filepath, 'wb') as f:  # 打开文件准备写入接收的音频
-            while bytes_received < client_audio_filesize:
-                remaining_bytes = client_audio_filesize - bytes_received
-                chunk = conn.recv(min(BUFFER_SIZE, remaining_bytes))
-                if not chunk:
-                    print(f"[Server] Client {addr} disconnected during audio file transfer.")
-                    break
-                f.write(chunk)
-                bytes_received += len(chunk)
+        # --- 2. 接收音频文件内容 ---
+        bytes_received_for_file = 0
+        file_saved_successfully = False
+        try:
+            with open(received_filepath, 'wb') if received_filepath else open(os.devnull,
+                                                                              'wb') as f:  # Write to devnull if dir creation failed
+                # Write initial data from metadata buffer
+                if metadata_buffer:
+                    f.write(metadata_buffer)
+                    bytes_received_for_file += len(metadata_buffer)
 
-        if bytes_received == client_audio_filesize:
-            print(
-                f"[Server] Successfully received '{client_audio_filename}' ({bytes_received} bytes) from {addr}. Saved to '{received_filepath}'.")
-        else:
-            print(
-                f"[Server] Incomplete audio file from {addr}. Expected {client_audio_filesize}, received {bytes_received}.")
-            # 可以选择不处理此不完整文件或发送错误
+                # Receive remaining file content
+                while bytes_received_for_file < client_audio_filesize:
+                    remaining = client_audio_filesize - bytes_received_for_file
+                    chunk = conn.recv(min(BUFFER_SIZE, remaining))
+                    if not chunk:
+                        print(f"[Server] Client {addr} disconnected during audio transfer.")
+                        break
+                    f.write(chunk)
+                    bytes_received_for_file += len(chunk)
 
-        # --- 准备并发送默认响应 ---
+            if bytes_received_for_file == client_audio_filesize:
+                if received_filepath:
+                    print(f"[Server] Received {bytes_received_for_file} bytes. Saved to '{received_filepath}'.")
+                else:
+                    print(f"[Server] Received {bytes_received_for_file} bytes (not saved).")
+                file_saved_successfully = True  # Mark as successful reception
+            else:
+                print(
+                    f"[Server] Incomplete audio from {addr}. Expected {client_audio_filesize}, got {bytes_received_for_file}.")
+                # Clean up incomplete file if it was created
+                if received_filepath and os.path.exists(received_filepath):
+                    try:
+                        os.remove(received_filepath)
+                    except OSError:
+                        pass
 
-        # 3. 准备默认 JSON 响应
+        except socket.timeout:
+            print(f"[Server] Timeout during audio transfer from {addr}.")
+        except IOError as e:
+            print(f"[Server] IOError saving received audio to '{received_filepath}': {e}")
+            # Continue processing request, but log save error
+        except Exception as e_recv:
+            print(f"[Server] Error receiving audio data: {e_recv}")
+            traceback.print_exc()
+            # Decide whether to continue or close connection
+
+        # --- 3. 准备并发送默认响应 (即使接收不完整也发送，用于测试客户端) ---
+        print(f"[Server] Preparing default response for {addr}...")
+
+        # a. Prepare JSON
         response_json_obj = create_default_response_json()
+        # Modify JSON based on received filename if needed (example)
+        # response_json_obj["received_file"] = client_audio_filename
         response_json_bytes = json.dumps(response_json_obj).encode()
         json_len = len(response_json_bytes)
 
-        # 4. 准备默认音频文件响应
+        # b. Prepare Audio
+        response_audio_filesize = 0
+        audio_data_to_send = b''
         if not os.path.exists(DEFAULT_RESPONSE_AUDIO_PATH):
-            print(f"[Server] CRITICAL ERROR: Default response audio file '{DEFAULT_RESPONSE_AUDIO_PATH}' not found!")
-            # 发送一个表示没有音频的响应 (size 0)
-            response_audio_filesize = 0
-            audio_data_to_send = b''
+            print(f"[Server] Warning: Default audio response '{DEFAULT_RESPONSE_AUDIO_PATH}' not found!")
         else:
-            response_audio_filesize = os.path.getsize(DEFAULT_RESPONSE_AUDIO_PATH)
-            with open(DEFAULT_RESPONSE_AUDIO_PATH, 'rb') as f_audio:
-                audio_data_to_send = f_audio.read()
+            try:
+                response_audio_filesize = os.path.getsize(DEFAULT_RESPONSE_AUDIO_PATH)
+                with open(DEFAULT_RESPONSE_AUDIO_PATH, 'rb') as f_audio:
+                    audio_data_to_send = f_audio.read()
+            except IOError as e:
+                print(f"[Server] Error reading default response audio '{DEFAULT_RESPONSE_AUDIO_PATH}': {e}")
+                response_audio_filesize = 0  # Send size 0 if file read fails
 
-        # 5. 发送响应给客户端 (与 vision_interaction.py 中客户端接收逻辑对应)
-        #   a. JSON 长度 (4 bytes, big-endian)
-        #   b. JSON 数据
-        #   c. 音频文件大小 (4 bytes, big-endian)
-        #   d. 音频文件数据
+        # --- 4. 发送响应 ---
+        try:
+            # Send JSON length (4 bytes)
+            conn.sendall(json_len.to_bytes(4, 'big'))
+            # Send JSON data
+            conn.sendall(response_json_bytes)
+            print(f"[Server] Sent JSON (len {json_len}): {response_json_obj}")
 
-        # a. 发送 JSON 长度
-        conn.sendall(json_len.to_bytes(4, 'big'))
-        print(f"[Server] Sending JSON length: {json_len} bytes")
+            # Send Audio length (4 bytes)
+            conn.sendall(response_audio_filesize.to_bytes(4, 'big'))
+            # Send Audio data (if size > 0)
+            if response_audio_filesize > 0:
+                conn.sendall(audio_data_to_send)
+                print(f"[Server] Sent Audio (len {response_audio_filesize}): '{DEFAULT_RESPONSE_AUDIO_PATH}'")
+            else:
+                print(f"[Server] Sent Audio length 0 (no audio data).")
 
-        # b. 发送 JSON 数据
-        conn.sendall(response_json_bytes)
-        print(f"[Server] Sent JSON response: {response_json_obj}")
+            print(f"[Server] Full response sent to {addr}.")
 
-        # c. 发送音频文件大小
-        conn.sendall(response_audio_filesize.to_bytes(4, 'big'))
-        print(f"[Server] Sending audio filesize: {response_audio_filesize} bytes")
+        except socket.timeout:
+            print(f"[Server] Timeout sending response to {addr}.")
+        except socket.error as e_send:
+            print(f"[Server] Socket error sending response to {addr}: {e_send}")
 
-        # d. 发送音频文件数据 (如果大小 > 0)
-        if response_audio_filesize > 0:
-            conn.sendall(audio_data_to_send)
-            print(f"[Server] Sent default audio response: '{DEFAULT_RESPONSE_AUDIO_PATH}'")
-        else:
-            print(f"[Server] No audio response sent (due to missing file or size 0).")
-
-        print(f"[Server] Response sent to {addr}. Closing connection.")
-
-    except socket.error as e:
-        print(f"[Server] Socket error with {addr}: {e}")
-    except Exception as e:
-        print(f"[Server] Unexpected error with {addr}: {e}")
+    except socket.timeout:
+        print(f"[Server] Timeout during initial connection phase with {addr}.")
+    except socket.error as e_sock:
+        print(f"[Server] Socket error with {addr}: {e_sock}")
+    except Exception as e_main:
+        print(f"[Server] Unexpected error handling client {addr}: {e_main}")
+        traceback.print_exc()
     finally:
+        print(f"[Server] Closing connection with {addr}.")
         conn.close()
 
 
 def main():
-    # 创建服务器套接字
+    """主服务器循环。"""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # 允许地址重用，避免 "Address already in use" 错误
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     try:
         server_socket.bind((SERVER_HOST, SERVER_PORT))
-        server_socket.listen(5)  # 最多允许5个排队连接
+        server_socket.listen(5)
         print(f"[Server] Mock Audio Server listening on {SERVER_HOST}:{SERVER_PORT}")
-        print(f"[Server] Default audio response will be: '{DEFAULT_RESPONSE_AUDIO_PATH}'")
         if not os.path.exists(DEFAULT_RESPONSE_AUDIO_PATH):
-            print(f"[Server] WARNING: Default response audio file '{DEFAULT_RESPONSE_AUDIO_PATH}' is missing!")
-            print(f"[Server] Please create it or the server will send a 0-byte audio response.")
+            print(f"[Server] WARNING: Default audio '{DEFAULT_RESPONSE_AUDIO_PATH}' not found!")
+        else:
+            print(f"[Server] Default audio response: '{DEFAULT_RESPONSE_AUDIO_PATH}'")
+        print(f"[Server] Default JSON response includes grasp action.")
 
         while True:
             try:
+                print("\n[Server] Waiting for new connection...")
                 conn, addr = server_socket.accept()
-                # 可以为每个客户端创建一个新线程来处理，但对于简单测试，串行处理也可以
-                # import threading
+                # Handle client sequentially (for simplicity)
+                # To handle multiple clients concurrently, use threading:
                 # client_thread = threading.Thread(target=handle_client, args=(conn, addr))
                 # client_thread.daemon = True
                 # client_thread.start()
-                handle_client(conn, addr)  # 简单串行处理
+                handle_client(conn, addr)
 
-            except socket.timeout:  # 如果设置了超时
-                print("[Server] Socket timeout, continuing to listen...")
             except KeyboardInterrupt:
-                print("[Server] Keyboard interrupt received. Shutting down...")
+                print("\n[Server] Keyboard interrupt received. Shutting down...")
                 break
             except Exception as e_accept:
                 print(f"[Server] Error accepting connection: {e_accept}")
-                time.sleep(1)  # 避免快速失败循环
+                time.sleep(1)  # Prevent rapid spinning on accept errors
 
-    except Exception as e:
-        print(f"[Server] Server critical error: {e}")
+    except OSError as e_bind:
+        print(f"[Server] CRITICAL ERROR binding to {SERVER_HOST}:{SERVER_PORT} - {e_bind}")
+        print("  Check if the port is already in use or if you have permissions.")
+    except Exception as e_main:
+        print(f"[Server] Server critical error: {e_main}")
+        traceback.print_exc()
     finally:
         print("[Server] Closing server socket.")
         server_socket.close()
 
 
 if __name__ == "__main__":
-    # 确保默认响应音频存在 (或提示用户创建)
+    # Check for default audio file before starting
     if not os.path.exists(DEFAULT_RESPONSE_AUDIO_PATH):
-        print(f"--- IMPORTANT ---")
-        print(f"Default response audio file '{DEFAULT_RESPONSE_AUDIO_PATH}' not found.")
-        print(f"Please create this WAV file, or run 'python create_default_wav.py' (if you have that script).")
-        print(f"Without it, the server will indicate no audio response to the client.")
-        print(f"-----------------")
-        # choice = input("Continue without default audio? (y/N): ")
-        # if choice.lower() != 'y':
-        #     exit()
+        print("-" * 20)
+        print(f"!! WARNING: Default response audio file '{DEFAULT_RESPONSE_AUDIO_PATH}' is missing.")
+        print("   The server will run but will send 0-length audio responses.")
+        print("   Consider creating a dummy WAV file or running 'create_default_wav.py'.")
+        print("-" * 20)
+        time.sleep(2)  # Pause to let user see the warning
     main()

@@ -837,6 +837,7 @@ class CPSClient:
                         print(f"夹爪仍在激活中 (激活状态码: {activate_state})...")
                 else:
                     print("读取夹爪状态失败，重试...")
+
                     # 可以增加连续失败计数器来提前退出
 
                 time.sleep(0.5)  # 轮询间隔
@@ -874,7 +875,7 @@ class CPSClient:
         read_cmd_hex = self.gripper.read_gripper_state(register_count)
 
         # 2. 清空可能存在的旧数据 (可选，但读取前通常不清空)
-        # self.flush_tci()
+        self.flush_tci()
 
         # 3. 发送读取命令
         suc_send, _ = self.send_tci(read_cmd_hex, hex_format=1)

@@ -1,6 +1,3 @@
-# v3: 双臂控制配置文件 (带模式切换, WAV 语音, 回正模式)
-
-# 环境和机器人设置
 setup:
   font_path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc" # !请根据你的系统修改!
   left_robot_ip: "192.168.188.200"
@@ -10,6 +7,17 @@ setup:
   window_width: 800
   window_height: 400
   font_size: 18
+  camera_serials:
+    left_hand: "CP1Z84200072"
+    right_hand: "CP1Z8420005H"
+#    head: "CP1Z842000WD"
+#    chest: "CL8NB4300WN"
+  yolo_models:
+    default: '/home/sage/Frank/code/dualarm_robot_project_1/software/config/best_bottle.pt'
+#    bottle: '/home/sage/Frank/code/dualarm_robot_project_1/software/config/best_bottle.pt'
+  calibration_files:
+    left: "./calibration_yaml/config_left.yaml"  # 左臂手眼标定文件
+    right: "./calibration_yaml/config_left.yaml" # 右臂手眼标定文件
 
 # --- 新增: 音频文件路径映射 ---
 audio_files:

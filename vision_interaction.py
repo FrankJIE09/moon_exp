@@ -1,508 +1,785 @@
 # vision_interaction.py
 # -*- coding: utf-8 -*-
 
+"""
+Handles vision mode interactions: voice command recording, communication with a server,
+and execution of commands, including 3D vision-based grasping using Orbbec camera and YOLO.
+
+This module assumes it is called by a main controller (like DualArmController)
+which manages the overall state, event loop (Pygame), and provides necessary
+instances for robot control, cameras, YOLO models, and calibration data.
+"""
+
 import socket
 import json
 import time
-import sounddevice as sd
-import soundfile as sf
-import numpy as np
-import threading  # 用于非阻塞录音和播放
-import queue  # 用于线程间通信
 import os
+import numpy as np
+import traceback
+import threading
+import queue
 
-# --- 配置 ---
-SERVER_IP = "127.0.0.1"  # 修改为您的 Socket 服务器 IP
-SERVER_PORT = 12345  # 修改为您的 Socket 服务器端口
-RECORD_DEVICE = None  # 使用默认录音设备，可以指定设备 ID 或名称
-PLAY_DEVICE = None  # 使用默认播放设备
-SAMPLE_RATE = 44100  # 录音采样率
-CHANNELS = 1  # 录音通道数
-TEMP_AUDIO_FILENAME_SEND = "temp_recorded_audio.wav"
-TEMP_AUDIO_FILENAME_RECV = "temp_received_audio.wav"
+# Audio Handling Dependencies (Choose one set or adapt)
+# Option 1: sounddevice + soundfile (Recommended for cross-platform)
+try:
+    import sounddevice as sd
+    import soundfile as sf
 
-# --- 状态变量 ---
+    AUDIO_LIB = "sounddevice"
+except ImportError:
+    print("Warning: sounddevice or soundfile not found. Audio recording/playback will fail.")
+    AUDIO_LIB = None
+
+# Option 2: PyAudio + wave (Alternative)
+# try:
+#     import pyaudio
+#     import wave
+#     AUDIO_LIB = "pyaudio"
+# except ImportError:
+#     # Fallback check if sounddevice also failed
+#     if not AUDIO_LIB:
+#         print("Warning: Neither sounddevice/soundfile nor PyAudio/wave found. Audio functions disabled.")
+#         AUDIO_LIB = None
+
+# Vision/Math Dependencies
+try:
+    from scipy.spatial.transform import Rotation as R
+except ImportError:
+    print("Warning: scipy not found. Coordinate transformations will fail.")
+    R = None  # Define R as None to allow conditional checks
+try:
+    from ultralytics import YOLO
+except ImportError:
+    print("Warning: ultralytics (YOLO) not found. Object detection will fail.")
+    YOLO = None  # Define YOLO as None
+
+# Assume orbbec_camera module provides necessary camera client functionality
+# Example: from software.vision.orbbec_camera import OrbbecCameraClient
+
+
+# --- Configuration Constants ---
+SERVER_IP = "127.0.0.1"  # IP of the backend processing server
+SERVER_PORT = 12345  # Port of the backend processing server
+CONNECTION_TIMEOUT = 10  # Socket connection timeout (seconds)
+RECV_TIMEOUT = 15  # Socket receive timeout (seconds)
+BUFFER_SIZE = 4096  # Socket buffer size
+
+# Audio Recording Settings
+RECORD_DEVICE = None  # Use system default device, can be specific index/name
+PLAY_DEVICE = None  # Use system default device
+SAMPLE_RATE = 44100  # Standard audio sample rate
+CHANNELS = 1  # Mono audio recording
+TEMP_AUDIO_FILENAME_SEND = "temp_recorded_audio.wav"  # Temp file for sending
+TEMP_AUDIO_FILENAME_RECV = "temp_received_audio.wav"  # Temp file for received audio
+
+# Vision/Grasp Settings
+CONF_THRESHOLD = 0.5  # YOLO detection confidence threshold
+OBSERVATION_HEIGHT_OFFSET_MM = 250.0  # Z offset for observation pose (mm)
+MAX_OBSERVATION_RETRIES = 2  # Max attempts for vision sequence
+DEFAULT_GRASP_SPEED = 30  # Speed for final grasp approach (mm/s or deg/s)
+DEFAULT_MOVE_SPEED = 50  # Speed for general moves
+DEFAULT_GRIPPER_SPEED = 150  # Gripper speed
+DEFAULT_GRIPPER_FORCE = 100  # Gripper force
+PRE_GRASP_OFFSET_Z_MM = 100.0  # Offset above grasp point (mm) - Assuming Base Z UP
+POST_GRASP_LIFT_Z_MM = 50.0  # Lift distance after grasp (mm) - Assuming Base Z UP
+DEFAULT_LEFT_GRASP_RPY = [180.0, 0.0, 180.0]  # Default grasp tool RPY for Left Arm (Base Frame)
+DEFAULT_RIGHT_GRASP_RPY = [180.0, 0.0, 0.0]  # Default grasp tool RPY for Right Arm (Base Frame)
+
+# --- Module State ---
 is_recording = False
 audio_frames = []
 recording_thread = None
-audio_processing_queue = queue.Queue()  # 用于将录音数据传递给发送线程
 
 
-# --- 占位符函数 ---
-def yolo_recognize_and_grasp(object_id, target_info):
-    """
-    占位符：使用 YOLO 识别物体并执行抓取。
-    object_id: 从服务器JSON中获取的要抓取的物体标识。
-    target_info: 可能包含物体位置等信息。
-    """
-    print(
-        f"[VISION_INTERACTION] Placeholder: Attempting to recognize and grasp object_id: {object_id} with info: {target_info}")
-    # 在这里集成您的 YOLO 模型和机器人抓取逻辑
-    # 例如:
-    # detected_object = yolo_detect(object_id)
-    # if detected_object:
-    #     success = robot_controller.grasp(detected_object.position, detected_object.orientation)
-    #     return success
-    # return False
-    time.sleep(2)  # 模拟操作耗时
-    print(f"[VISION_INTERACTION] Placeholder: Grasp action for {object_id} completed.")
-    return True
+# --- Audio Handling Functions ---
+
+def record_audio_callback(indata, frames, time, status):
+    """Callback for sounddevice InputStream."""
+    global audio_frames
+    if status:
+        # E.g., Input overflow, Underflow
+        print(f"[Audio Callback] Status: {status}", flush=True)
+    if is_recording:  # Only append if still in recording state
+        audio_frames.append(indata.copy())
 
 
 def play_audio_file(filename):
-    """播放指定的音频文件"""
+    """Plays an audio file using sounddevice."""
+    if AUDIO_LIB != "sounddevice":
+        print("[Play Audio] Error: sounddevice library not available.")
+        return
     try:
         if not os.path.exists(filename):
-            print(f"[VISION_INTERACTION] Error: Audio file not found for playback: {filename}")
+            print(f"[Play Audio] Error: File not found: {filename}")
             return
-
         data, fs = sf.read(filename, dtype='float32')
-        print(f"[VISION_INTERACTION] Playing received audio: {filename}")
-        sd.play(data, fs, device=PLAY_DEVICE)
-        sd.wait()  # 等待播放完成
-        print(f"[VISION_INTERACTION] Playback finished.")
+        print(f"[Play Audio] Playing {filename} (Sample rate: {fs})...")
+        sd.play(data, fs, device=PLAY_DEVICE, blocking=True)  # Use blocking=True
+        # sd.wait() # No longer needed if blocking=True
+        print(f"[Play Audio] Playback finished.")
     except Exception as e:
-        print(f"[VISION_INTERACTION] Error playing audio file {filename}: {e}")
-
-
-# --- 核心功能 ---
-
-def record_audio_callback(indata, frames, time, status):
-    """sounddevice 录音回调函数"""
-    global audio_frames
-    if status:
-        print(f"[VISION_INTERACTION] Recording status: {status}")
-    audio_frames.append(indata.copy())
+        print(f"[Play Audio] Error playing {filename}: {e}")
+        traceback.print_exc()
 
 
 def start_recording_thread():
-    """启动一个新线程来录音"""
+    """Starts a background thread for audio recording using sounddevice."""
     global is_recording, audio_frames, recording_thread
 
+    if AUDIO_LIB != "sounddevice":
+        print("[Start Recording] Error: sounddevice library not available.")
+        return False
     if is_recording:
-        print("[VISION_INTERACTION] Already recording.")
+        print("[Start Recording] Already recording.")
         return False
 
-    print("[VISION_INTERACTION] Starting recording... Press 'Y' to stop, 'A' to cancel.")
-    audio_frames = []
-    is_recording = True
+    print("[Start Recording] Starting recording... Trigger Stop/Cancel via main controller.")
+    audio_frames = []  # Clear previous frames
+    is_recording = True  # Set state flag
 
-    def _record():
+    def _record_task():
+        """The actual recording task run in the thread."""
         global is_recording, audio_frames
         try:
+            # Use sounddevice stream within the thread context
             with sd.InputStream(samplerate=SAMPLE_RATE, device=RECORD_DEVICE,
-                                channels=CHANNELS, callback=record_audio_callback):
+                                channels=CHANNELS, callback=record_audio_callback,
+                                blocksize=1024):  # Adjust blocksize if needed
                 while is_recording:
-                    sd.sleep(100)  # 保持流打开直到 is_recording 变为 False
+                    sd.sleep(50)  # Sleep briefly to allow state changes
+            print("[Record Thread] Recording stream stopped.")
+        except sd.PortAudioError as pae:
+            print(f"[Record Thread] PortAudio Error during recording stream: {pae}")
+            # Potentially indicate failure to the main thread
+            is_recording = False  # Ensure state reflects stop
         except Exception as e:
-            print(f"[VISION_INTERACTION] Error during recording stream: {e}")
-        finally:
-            # 确保即使发生错误，is_recording 也会被重置（如果需要）
-            # is_recording = False # 或者由 stop_recording 控制
-            pass
+            print(f"[Record Thread] Error during recording stream: {e}")
+            traceback.print_exc()
+            is_recording = False  # Ensure state reflects stop
 
-    recording_thread = threading.Thread(target=_record)
-    recording_thread.daemon = True  # 允许主程序退出时线程也退出
+    recording_thread = threading.Thread(target=_record_task, name="AudioRecordThread")
+    recording_thread.daemon = True
     recording_thread.start()
     return True
 
 
 def stop_recording_and_save(save_path=TEMP_AUDIO_FILENAME_SEND):
-    """停止录音并保存到文件"""
+    """Stops the recording thread and saves the captured audio."""
     global is_recording, audio_frames, recording_thread
 
-    if not is_recording and not audio_frames:  # 如果没有在录音且没有数据
-        print("[VISION_INTERACTION] Not recording or no audio data to save.")
+    if not is_recording and not audio_frames:
+        print("[Stop Recording] Not recording or no audio data captured.")
         return None
 
-    if is_recording:  # 如果仍在录音（例如因为超时或其他原因调用）
-        print("[VISION_INTERACTION] Stopping recording...")
-        is_recording = False  # 通知录音线程停止
-        if recording_thread and recording_thread.is_alive():
-            recording_thread.join(timeout=1.0)  # 等待录音线程结束
-        if recording_thread and recording_thread.is_alive():
-            print("[VISION_INTERACTION] Warning: Recording thread did not terminate gracefully.")
+    if is_recording:
+        print("[Stop Recording] Signaling recording thread to stop...")
+        is_recording = False  # Signal thread to exit loop
+
+    if recording_thread and recording_thread.is_alive():
+        print("[Stop Recording] Waiting for recording thread to finish...")
+        recording_thread.join(timeout=2.0)  # Wait for thread (max 2 sec)
+        if recording_thread.is_alive():
+            print("[Stop Recording] Warning: Recording thread did not terminate.")
+            # Forcefully losing audio frames might happen here if thread is stuck
+
+    recording_thread = None  # Clear thread reference
 
     if not audio_frames:
-        print("[VISION_INTERACTION] No audio frames captured.")
+        print("[Stop Recording] No audio frames were captured.")
         return None
 
-    print(f"[VISION_INTERACTION] Saving recorded audio to {save_path}")
+    print(f"[Stop Recording] Saving {len(audio_frames)} frames to {save_path}")
     try:
-        recording_data = np.concatenate(audio_frames, axis=0)
-        sf.write(save_path, recording_data, SAMPLE_RATE)
-        print(f"[VISION_INTERACTION] Audio saved successfully: {save_path}")
-        audio_frames = []  # 清空缓存
-        return save_path
+        # Concatenate frames only if library is sounddevice
+        if AUDIO_LIB == "sounddevice":
+            if not audio_frames:  # Double check after join
+                print("[Stop Recording] No audio frames after thread join.")
+                return None
+            recording_data = np.concatenate(audio_frames, axis=0)
+            sf.write(save_path, recording_data, SAMPLE_RATE)
+            print(f"[Stop Recording] Audio saved successfully: {save_path}")
+            audio_frames = []  # Clear buffer
+            return save_path
+        else:
+            print("[Stop Recording] Error: Cannot save, unsupported audio library.")
+            audio_frames = []
+            return None
     except Exception as e:
-        print(f"[VISION_INTERACTION] Error saving audio: {e}")
-        audio_frames = []  # 清空缓存
+        print(f"[Stop Recording] Error saving audio: {e}")
+        traceback.print_exc()
+        audio_frames = []
         return None
 
 
 def cancel_recording():
-    """取消当前录音"""
+    """Cancels the current recording without saving."""
     global is_recording, audio_frames, recording_thread
-    if is_recording:
-        print("[VISION_INTERACTION] Cancelling recording...")
-        is_recording = False
-        if recording_thread and recording_thread.is_alive():
-            recording_thread.join(timeout=1.0)
-        audio_frames = []  # 清空已录制的帧
-        print("[VISION_INTERACTION] Recording cancelled.")
-        return True
-    print("[VISION_INTERACTION] No active recording to cancel.")
-    return False
+    if not is_recording:
+        print("[Cancel Recording] No active recording to cancel.")
+        return False
 
+    print("[Cancel Recording] Canceling recording...")
+    is_recording = False  # Signal thread to stop
+
+    if recording_thread and recording_thread.is_alive():
+        recording_thread.join(timeout=1.0)  # Wait briefly
+        if recording_thread.is_alive():
+            print("[Cancel Recording] Warning: Recording thread did not terminate quickly.")
+
+    recording_thread = None
+    audio_frames = []  # Discard frames
+    print("[Cancel Recording] Recording cancelled and data discarded.")
+    return True
+
+
+# --- Network Communication ---
 
 def send_audio_and_receive_response(audio_filepath):
-    """通过 Socket 发送音频文件，接收音频和 JSON 响应"""
+    """
+    Sends audio file via Socket, receives JSON and audio response.
+    Includes timeouts and robust receiving logic.
+    """
+    # ...(Implementation from the previous response, including timeouts)...
     if not os.path.exists(audio_filepath):
-        print(f"[VISION_INTERACTION] Audio file not found for sending: {audio_filepath}")
+        print(f"[VISION_INTERACTION] Error: Audio file not found for sending: {audio_filepath}")
         return None, None
 
+    received_json = None
+    received_audio_path = None
+    sock = None
+
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            print(f"[VISION_INTERACTION] Connecting to server {SERVER_IP}:{SERVER_PORT}...")
-            s.connect((SERVER_IP, SERVER_PORT))
-            print("[VISION_INTERACTION] Connected to server.")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(CONNECTION_TIMEOUT)
 
-            # 1. 发送音频文件大小和文件名 (元数据)
-            filesize = os.path.getsize(audio_filepath)
-            filename = os.path.basename(audio_filepath)
-            metadata = f"{filename}:{filesize}\n"  # 使用换行符分隔元数据和文件内容
-            time.sleep(0.1)
-            s.sendall(metadata.encode())
-            print(f"[VISION_INTERACTION] Sent metadata: {metadata.strip()}")
+        print(
+            f"[VISION_INTERACTION] Connecting to server {SERVER_IP}:{SERVER_PORT} (Timeout: {CONNECTION_TIMEOUT}s)...")
+        sock.connect((SERVER_IP, SERVER_PORT))
+        print("[VISION_INTERACTION] Connected to server.")
+        sock.settimeout(RECV_TIMEOUT)
 
-            # 2. 发送音频文件内容
-            with open(audio_filepath, 'rb') as f:
-                while True:
-                    bytes_read = f.read(4096)
-                    if not bytes_read:
-                        break
-                    s.sendall(bytes_read)
-            print(f"[VISION_INTERACTION] Audio file '{audio_filepath}' sent.")
-            # 可选：发送一个结束标记，如果服务器需要
-            # s.sendall(b"EOF_AUDIO")
+        # 1. Send metadata
+        filesize = os.path.getsize(audio_filepath)
+        filename = os.path.basename(audio_filepath)
+        filename_safe = filename.replace("\n", "_").replace(":", "_")
+        metadata = f"{filename_safe}:{filesize}\n"
+        print(f"[VISION_INTERACTION] Sending metadata: {metadata.strip()} ({len(metadata.encode())} bytes)")
+        sock.sendall(metadata.encode())
+        print(f"[VISION_INTERACTION] Metadata sent.")
 
-            # 3. 接收服务器响应 (假设先收到 JSON，后收到音频)
-            #    或者服务器可以先发送一个头部，指明接下来是什么类型的数据和长度
+        # 2. Send audio file
+        print(f"[VISION_INTERACTION] Sending audio file '{audio_filepath}' ({filesize} bytes)...")
+        with open(audio_filepath, 'rb') as f:
+            bytes_sent = 0
+            while True:
+                bytes_read = f.read(BUFFER_SIZE)
+                if not bytes_read: break
+                sock.sendall(bytes_read)
+                bytes_sent += len(bytes_read)
+        print(f"[VISION_INTERACTION] Audio file sent ({bytes_sent} bytes).")
 
-            # 简化处理：假设服务器先发送JSON长度，然后JSON，然后音频文件大小，然后音频
+        # 3. Receive Response
+        # --- Receive JSON ---
+        print(f"[VISION_INTERACTION] Waiting for JSON length (Timeout: {RECV_TIMEOUT}s)...")
+        json_len_bytes = sock.recv(4)
+        if not json_len_bytes or len(json_len_bytes) < 4:
+            print("[VISION_INTERACTION] Error: Did not receive complete JSON length.")
+            return None, None
+        json_len = int.from_bytes(json_len_bytes, 'big')
+        print(f"[VISION_INTERACTION] Expecting JSON: {json_len} bytes.")
 
-            # 接收JSON长度 (假设4字节)
-            json_len_bytes = s.recv(4)
-            if not json_len_bytes:
-                print("[VISION_INTERACTION] Did not receive JSON length from server.")
-                return None, None
-            json_len = int.from_bytes(json_len_bytes, 'big')
-            print(f"[VISION_INTERACTION] Expecting JSON of length: {json_len}")
-
-            # 接收JSON数据
+        if 0 < json_len < 10 * 1024 * 1024:  # Check reasonable size
             json_data_bytes = b''
             while len(json_data_bytes) < json_len:
-                packet = s.recv(json_len - len(json_data_bytes))
-                if not packet: break
-                json_data_bytes += packet
+                chunk = sock.recv(min(json_len - len(json_data_bytes), BUFFER_SIZE))
+                if not chunk:
+                    print("[VISION_INTERACTION] Error: Connection closed while receiving JSON.")
+                    break
+                json_data_bytes += chunk
 
-            if len(json_data_bytes) != json_len:
-                print("[VISION_INTERACTION] Did not receive complete JSON data.")
-                return None, None
+            if len(json_data_bytes) == json_len:
+                try:
+                    received_json = json.loads(json_data_bytes.decode())
+                    print(f"[VISION_INTERACTION] Received JSON: {received_json}")
+                except json.JSONDecodeError as e_json:
+                    print(
+                        f"[VISION_INTERACTION] JSON decode error: {e_json}. Data: '{json_data_bytes.decode(errors='ignore')}'")
+                    received_json = {"error": "JSONDecodeError"}
+            else:
+                print(
+                    f"[VISION_INTERACTION] Error: Incomplete JSON data. Expected {json_len}, got {len(json_data_bytes)}.")
+                received_json = {"error": "Incomplete JSON"}
+        elif json_len == 0:
+            print("[VISION_INTERACTION] Server indicated no JSON response (length 0).")
+            received_json = {}
+        else:
+            print(f"[VISION_INTERACTION] Error: Invalid JSON length received ({json_len}).")
+            received_json = {"error": "Invalid JSON Length"}
 
-            received_json = json.loads(json_data_bytes.decode())
-            print(f"[VISION_INTERACTION] Received JSON: {received_json}")
+        # --- Receive Audio ---
+        print(f"[VISION_INTERACTION] Waiting for audio filesize...")
+        audio_filesize_bytes = sock.recv(4)
+        if not audio_filesize_bytes or len(audio_filesize_bytes) < 4:
+            print("[VISION_INTERACTION] Error: Did not receive complete audio filesize.")
+            return None, received_json  # JSON might be valid
+        audio_filesize = int.from_bytes(audio_filesize_bytes, 'big')
+        print(f"[VISION_INTERACTION] Expecting audio file: {audio_filesize} bytes.")
 
-            # 接收返回的音频文件大小 (假设4字节)
-            audio_filesize_bytes = s.recv(4)
-            if not audio_filesize_bytes:
-                print("[VISION_INTERACTION] Server did not send audio filesize.")
-                # 可能没有返回音频，只有JSON
-                if os.path.exists(TEMP_AUDIO_FILENAME_RECV):  # 删除旧的临时文件
-                    os.remove(TEMP_AUDIO_FILENAME_RECV)
-                return None, received_json  # 返回 None 表示没有音频文件
+        # Clean old temp file if exists
+        if os.path.exists(TEMP_AUDIO_FILENAME_RECV):
+            try:
+                os.remove(TEMP_AUDIO_FILENAME_RECV)
+            except OSError as e:
+                print(f"Warning: Could not remove old temp audio: {e}")
 
-            audio_filesize = int.from_bytes(audio_filesize_bytes, 'big')
-            print(f"[VISION_INTERACTION] Expecting audio file of size: {audio_filesize}")
-
-            if audio_filesize == 0:
-                print("[VISION_INTERACTION] Server indicated no audio response (size 0).")
-                if os.path.exists(TEMP_AUDIO_FILENAME_RECV):
-                    os.remove(TEMP_AUDIO_FILENAME_RECV)
-                return None, received_json
-
-            # 接收音频文件
-            with open(TEMP_AUDIO_FILENAME_RECV, 'wb') as f:
+        if 0 < audio_filesize < 50 * 1024 * 1024:  # Reasonable audio size limit
+            print(f"[VISION_INTERACTION] Receiving audio file '{TEMP_AUDIO_FILENAME_RECV}'...")
+            with open(TEMP_AUDIO_FILENAME_RECV, 'wb') as f_recv:
                 bytes_received = 0
                 while bytes_received < audio_filesize:
-                    chunk = s.recv(min(4096, audio_filesize - bytes_received))
+                    chunk = sock.recv(min(BUFFER_SIZE, audio_filesize - bytes_received))
                     if not chunk:
+                        print("[VISION_INTERACTION] Error: Connection closed while receiving audio.")
                         break
-                    f.write(chunk)
+                    f_recv.write(chunk)
                     bytes_received += len(chunk)
 
             if bytes_received == audio_filesize:
-                print(f"[VISION_INTERACTION] Received audio saved to {TEMP_AUDIO_FILENAME_RECV}")
-                return TEMP_AUDIO_FILENAME_RECV, received_json
+                print(f"[VISION_INTERACTION] Received audio saved: '{TEMP_AUDIO_FILENAME_RECV}'")
+                received_audio_path = TEMP_AUDIO_FILENAME_RECV
             else:
-                print(
-                    f"[VISION_INTERACTION] Incomplete audio received. Expected {audio_filesize}, got {bytes_received}")
-                if os.path.exists(TEMP_AUDIO_FILENAME_RECV):
-                    os.remove(TEMP_AUDIO_FILENAME_RECV)
-                return None, received_json  # JSON 可能仍然有效
+                print(f"[VISION_INTERACTION] Error: Incomplete audio. Expected {audio_filesize}, got {bytes_received}.")
+                if os.path.exists(TEMP_AUDIO_FILENAME_RECV):  # Clean incomplete file
+                    try:
+                        os.remove(TEMP_AUDIO_FILENAME_RECV)
+                    except OSError as e:
+                        print(f"Warning: Could not remove incomplete temp audio: {e}")
+                received_audio_path = None
+        elif audio_filesize == 0:
+            print("[VISION_INTERACTION] Server indicated no audio response (size 0).")
+            received_audio_path = None
+        else:
+            print(f"[VISION_INTERACTION] Error: Invalid audio filesize ({audio_filesize}).")
+            received_audio_path = None
 
-    except socket.error as e:
-        print(f"[VISION_INTERACTION] Socket error: {e}")
-    except json.JSONDecodeError as e:
-        print(f"[VISION_INTERACTION] JSON decode error: {e}")
-    except Exception as e:
-        print(f"[VISION_INTERACTION] Error in send_audio_and_receive_response: {e}")
-    return None, None
+        return received_audio_path, received_json
 
-
-def process_vision_interaction():
-    """
-    主函数，用于在视觉模式下处理语音交互。
-    这个函数会被 run_vision_mode 调用。
-    按键检测需要由外部 Pygame 事件循环处理并调用这里的函数。
-    """
-    print("[VISION_INTERACTION] Vision interaction mode active.")
-    print("[VISION_INTERACTION] Press 'X' (controller button) to start recording voice command.")
-
-    # 这个函数本身不处理按键，而是等待外部调用其子函数
-    # 例如: handle_vision_keypress('x'), handle_vision_keypress('y'), etc.
-    #
-    # 模拟一次交互流程，实际调用会由外部事件驱动
-    # if simulate_keypress_x():
-    #     start_recording_thread()
-    #     time.sleep(3) # 模拟录音时长
-    #     if simulate_keypress_y():
-    #         saved_audio_path = stop_recording_and_save()
-    #         if saved_audio_path:
-    #             received_audio_path, command_json = send_audio_and_receive_response(saved_audio_path)
-    #             if received_audio_path:
-    #                 play_audio_file(received_audio_path)
-    #                 os.remove(received_audio_path) # 清理临时文件
-    #             if command_json:
-    #                 handle_command_json(command_json)
-    #             if os.path.exists(saved_audio_path):
-    #                 os.remove(saved_audio_path) # 清理临时文件
-    pass  # 实际逻辑由外部事件调用
+    except socket.timeout as e_timeout:
+        print(f"[VISION_INTERACTION] Socket timeout: {e_timeout}")
+        return None, received_json  # Return potentially valid JSON
+    except socket.error as e_sock:
+        print(f"[VISION_INTERACTION] Socket error: {e_sock}")
+        return None, received_json
+    except Exception as e_general:
+        print(f"[VISION_INTERACTION] Unexpected error in send/receive: {e_general}")
+        traceback.print_exc()
+        return None, received_json
+    finally:
+        if sock:
+            print("[VISION_INTERACTION] Closing socket.")
+            sock.close()
 
 
-def handle_command_json(command_json):
-    """处理从服务器接收到的JSON指令"""
-    if not isinstance(command_json, dict):
-        print(f"[VISION_INTERACTION] Invalid command JSON format: {command_json}")
-        return
+# --- Helper: Transformation ---
+def create_transformation_matrix(translation_mm, rpy_degrees):
+    """Creates a 4x4 transformation matrix from translation (mm) and RPY (deg)."""
+    if R is None: raise ImportError("scipy is required for transformations.")
+    T = np.eye(4)
+    T[:3, 3] = np.array(translation_mm) / 1000.0  # Convert mm to meters
+    try:
+        r = R.from_euler('xyz', rpy_degrees, degrees=True)
+        T[:3, :3] = r.as_matrix()
+    except ValueError as e:
+        print(f"[Transform Helper] Error creating rotation from RPY {rpy_degrees}: {e}. Using identity.")
+        # Keep T[:3,:3] as identity
+    return T
 
-    print(f"[VISION_INTERACTION] Handling command JSON: {command_json}")
-    action = command_json.get("action")  # 假设JSON中有 "action" 字段
-    target = command_json.get("target")  # 假设有 "target" 字段
-    # 例如: {"action": "grasp", "target": 1} or {"action": "moveTo", "target": [x,y,z]}
 
-    if action == "grasp" and target is not None:
-        print(f"[VISION_INTERACTION] Received grasp command for target: {target}")
-        # 假设 target 是物体 ID 或者更详细的信息
-        # object_id = target if isinstance(target, (int, str)) else target.get("id")
-        object_id = target  # 简化，假设 target 就是 ID
-        yolo_recognize_and_grasp(object_id, command_json)  # 将整个 JSON 传递过去，可能包含额外信息
-    elif action == "play_message":
-        message = command_json.get("message", "No message content.")
-        print(f"[VISION_INTERACTION] Server message: {message}")
-        # 如果需要，这里也可以触发TTS播放 message
+def transformation_matrix_to_xyzrpy(matrix):
+    """Converts a 4x4 matrix back to [x,y,z (mm), r,p,y (deg)]."""
+    if R is None: raise ImportError("scipy is required for transformations.")
+    translation_meters = matrix[:3, 3]
+    rotation_matrix = matrix[:3, :3]
+    try:
+        r = R.from_matrix(rotation_matrix)
+        # Check for gimbal lock or invalid rotation matrix if needed
+        euler_angles_deg = r.as_euler('xyz', degrees=True)
+    except ValueError as e:
+        print(f"[Transform Helper] Error converting matrix to RPY: {e}. Using [0,0,0].")
+        euler_angles_deg = [0.0, 0.0, 0.0]
+    translation_mm = translation_meters * 1000.0
+    return list(translation_mm) + list(euler_angles_deg)
+
+
+def transform_point(point_xyz_m, matrix):
+    """Applies a 4x4 transformation matrix to a 3D point (in meters)."""
+    point_4d = np.append(np.array(point_xyz_m), 1)
+    transformed_point_4d = matrix @ point_4d
+    return list(transformed_point_4d[:3])  # Return meters
+
+
+# --- Core Vision & Grasp Logic ---
+
+def move_arm_to_observe(arm_choice, target_coords_mm, robot_controllers):
+    """Moves the chosen arm's camera to observe the target area."""
+    # ...(Implementation from previous response)...
+    print(f"[Observe] Moving {arm_choice} arm to observe near {target_coords_mm}...")
+    controller = robot_controllers.get(arm_choice)
+    if not controller:
+        print(f"[Observe] Error: Controller for {arm_choice} not found.")
+        return False
+
+    obs_pose_xyz = list(target_coords_mm[:3])
+    obs_pose_xyz[2] += OBSERVATION_HEIGHT_OFFSET_MM
+
+    if arm_choice == "left":
+        obs_rpy = list(DEFAULT_LEFT_GRASP_RPY)  # Assume camera points same as tool down
     else:
-        print(f"[VISION_INTERACTION] Unknown or unhandled action: {action}")
+        obs_rpy = list(DEFAULT_RIGHT_GRASP_RPY)
+
+    final_obs_pose = obs_pose_xyz + obs_rpy
+    print(f"[Observe] Calculated Observation Pose (Base): {final_obs_pose}")
+
+    move_func = getattr(controller, 'move_robot' if arm_choice == 'left' else 'move_right_robot', None)
+    if not move_func:
+        print(f"[Observe] Error: Move function not found for {arm_choice} controller.")
+        return False
+
+    try:
+        print(f"  [{arm_choice.upper()}] Executing move to observe...")
+        if not move_func(list(final_obs_pose), speed=DEFAULT_MOVE_SPEED, block=True):
+            print(f"  [{arm_choice.upper()}] Error: Failed to move to observation pose.")
+            return False
+        print(f"  [{arm_choice.upper()}] Reached observation pose.")
+        time.sleep(0.5)
+        return True
+    except Exception as e:
+        print(f"[Observe] Error during move: {e}")
+        traceback.print_exc()
+        return False
 
 
-# --- 这个模块如何被主程序使用 ---
-# 在你的主程序 (例如 main_controller.py) 的 run_vision_mode 中:
-#
-# from vision_interaction import (
-#     start_recording_thread,
-#     stop_recording_and_save,
-#     cancel_recording,
-#     send_audio_and_receive_response,
-#     play_audio_file,
-#     handle_command_json,
-#     TEMP_AUDIO_FILENAME_SEND,
-#     TEMP_AUDIO_FILENAME_RECV
-# )
-# import os
-#
-# # 假设在 DualArmController 类中或其 UI 管理器中
-# # 你需要有变量来追踪视觉模式的状态，例如 `self.vision_mode_recording = False`
-#
-# def run_vision_mode(self): # 这里的 self 是 DualArmController 实例
-#     print("== 进入视觉模式 (实际逻辑) ==")
-#     self.ui_manager.play_sound('vision_enter') # 假设有进入音效
-#     # 提示用户按键
-#     # self.ui_manager.update_display_message("视觉模式: 按 X 键开始录音")
-#
-#     # 在主事件循环 (DualArmController._handle_events) 中检测视觉模式下的特定按键
-#     # 例如，如果当前是 VISION_MODE 并且按下了 'X' 按钮 (根据你的 controls_map 配置)
-#     # if self.control_mode == MODE_VISION and event.type == pygame.JOYBUTTONDOWN:
-#     #     if event.button == self.config.get_vision_record_button_idx(): # 假设配置了按键
-#     #         if not vision_interaction.is_recording: # 使用 is_recording 状态
-#     #             vision_interaction.start_recording_thread()
-#     #             # self.ui_manager.update_display_message("录音中... 按 Y 结束, A 取消")
-#     #         else:
-#     #             print("已经在录音了")
-#     #
-#     #     elif event.button == self.config.get_vision_stop_button_idx():
-#     #         if vision_interaction.is_recording:
-#     #             saved_path = vision_interaction.stop_recording_and_save()
-#     #             if saved_path:
-#     #                 # self.ui_manager.update_display_message("发送语音...")
-#     #                 # 为了不阻塞主循环，发送和接收也应该在线程中
-#     #                 threading.Thread(target=self._process_recorded_audio, args=(saved_path,)).start()
-#     #
-#     #     elif event.button == self.config.get_vision_cancel_button_idx():
-#     #         if vision_interaction.is_recording:
-#     #             vision_interaction.cancel_recording()
-#     #             # self.ui_manager.update_display_message("录音已取消. 按 X 重新开始.")
-#     pass # run_vision_mode 本身可能不需要做太多，主要依赖事件循环调用此模块的函数
+def capture_and_detect(object_id, camera_client, yolo_model):
+    """Captures frames and runs YOLO detection."""
+    # ...(Implementation from previous response)...
+    if not camera_client or not yolo_model:
+        print("[Detect] Error: Camera client or YOLO model not provided.")
+        return None, None, None
 
-# def _process_recorded_audio(self, saved_audio_path): # 线程中运行的方法
-#     # from vision_interaction import send_audio_and_receive_response, play_audio_file, handle_command_json, TEMP_AUDIO_FILENAME_RECV
-#     # import os
-#     received_audio, command = send_audio_and_receive_response(saved_audio_path)
-#     if os.path.exists(saved_audio_path):
-#         os.remove(saved_audio_path)
-#
-#     if received_audio:
-#         # self.ui_manager.update_display_message("播放服务器回复...")
-#         play_audio_file(received_audio)
-#         if os.path.exists(received_audio): # TEMP_AUDIO_FILENAME_RECV
-#             os.remove(received_audio)
-#
-#     if command:
-#         # self.ui_manager.update_display_message(f"收到指令: {command.get('action','N/A')}")
-#         handle_command_json(command)
-#     # self.ui_manager.update_display_message("视觉模式: 按 X 键开始录音")
+    print(f"[Detect] Capturing frames and detecting '{object_id}'...")
+    try:
+        color_image, depth_image, depth_frame = camera_client.get_frames()
+        if color_image is None or depth_frame is None:
+            print("[Detect] Error: Failed to capture valid frames.")
+            return None, None, None
 
+        # Optional: Adjust exposure...
 
-if __name__ == '__main__':
-    # --- 本地测试 (不依赖主程序 pygame) ---
-    # 需要安装 keyboard 库: pip install keyboard
-    import keyboard
+        # --- YOLO Detection ---
+        print("[Detect] Running YOLO prediction...")
+        results = yolo_model.predict(color_image, conf=CONF_THRESHOLD, verbose=False)  # verbose=False less output
 
-    print("本地测试 vision_interaction.py (需要管理员权限运行 keyboard 库，或在 Linux 上作为 root)")
-    print("按 'x' 开始录音, 'y' 停止并处理, 'a' 取消录音, 'q' 退出测试.")
+        best_box = None
+        min_depth = float('inf')
+        detection_found = False
+
+        for result in results:
+            if result.boxes is None: continue  # Handle cases where no boxes are found
+            boxes = result.boxes.xyxy.cpu().numpy()
+            confidences = result.boxes.conf.cpu().numpy()
+            labels = result.names
+            class_ids = result.boxes.cls.cpu().numpy()
+
+            print(f"[Detect] Found {len(boxes)} boxes in image.")
+            for i, box in enumerate(boxes):
+                conf = confidences[i]
+                cls_id = int(class_ids[i])
+                label_name = labels.get(cls_id, "unknown")
+
+                if label_name == object_id:
+                    detection_found = True
+                    x1, y1, x2, y2 = box
+                    center_x = int((x1 + x2) / 2)
+                    center_y = int((y1 + y2) / 2)
+
+                    # Check bounds before getting depth
+                    h, w = depth_frame.shape[:2]
+                    if not (0 <= center_x < w and 0 <= center_y < h):
+                        print(
+                            f"[Detect] Center pixel ({center_x},{center_y}) out of bounds for depth frame ({w}x{h}). Skipping box.")
+                        continue
+
+                    depth_mm = camera_client.get_depth_for_color_pixel(depth_frame=depth_frame,
+                                                                       color_point=[center_x, center_y])
+
+                    if depth_mm is not None and 0 < depth_mm < 10000:  # Check valid range (e.g., < 10m)
+                        print(f"[Detect]   Found '{object_id}' (Conf: {conf:.2f}, Depth: {depth_mm}mm)")
+                        if depth_mm < min_depth:
+                            min_depth = depth_mm
+                            best_box = box
+                    # else: print(f"[Detect]   Found '{object_id}' but invalid depth ({depth_mm})")
+
+        if best_box is not None:
+            print(f"[Detect] Best box selected: {best_box} at depth {min_depth}mm")
+            return best_box, color_image, depth_frame
+        else:
+            msg = f"Object '{object_id}' not found with valid depth." if detection_found else f"Object '{object_id}' not found."
+            print(f"[Detect] {msg}")
+            return None, color_image, depth_frame
+
+    except Exception as e:
+        print(f"[Detect] Error during capture/detection: {e}")
+        traceback.print_exc()
+        return None, None, None
 
 
-    # 模拟服务器端 (简单的 echo 和固定 JSON)
-    def mock_server(server_ip, server_port):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_serv:
-            s_serv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s_serv.bind((server_ip, server_port))
-            s_serv.listen()
-            print(f"[MockServer] Listening on {server_ip}:{server_port}")
-            conn, addr = s_serv.accept()
-            with conn:
-                print(f"[MockServer] Connected by {addr}")
-                # 接收元数据
-                metadata_bytes = conn.recv(1024)  # 假设元数据不会太长
-                metadata_str = metadata_bytes.decode().strip()
-                print(f"[MockServer] Received metadata: {metadata_str}")
+def calculate_3d_position_camera_frame(detection_box, depth_frame, camera_client):
+    """Calculates object center 3D position in CAMERA frame (meters)."""
+    # ...(Implementation from previous response)...
+    if detection_box is None or depth_frame is None or camera_client is None: return None
+    print(f"[Calc Pos Cam] Calculating 3D position for box: {detection_box}")
+    try:
+        # Check for intrinsics
+        if not all(hasattr(camera_client, attr) for attr in ['rgb_fx', 'rgb_fy', 'ppx', 'ppy']):
+            print("[Calc Pos Cam] Error: Camera client missing intrinsic attributes.")
+            return None
+        fx, fy = camera_client.rgb_fx, camera_client.rgb_fy
+        ppx, ppy = camera_client.ppx, camera_client.ppy
+        if fx == 0 or fy == 0:
+            print(f"[Calc Pos Cam] Error: Invalid camera intrinsics fx={fx}, fy={fy}")
+            return None
 
-                # 提取文件名和大小 (简单示例，实际应更健壮)
-                try:
-                    filename_cli, filesize_cli_str = metadata_str.split(':')
-                    filesize_cli = int(filesize_cli_str)
-                except ValueError:
-                    print("[MockServer] Invalid metadata format.")
-                    return
+        x1, y1, x2, y2 = detection_box
+        center_x = int((x1 + x2) / 2)
+        center_y = int((y1 + y2) / 2)
 
-                print(f"[MockServer] Expecting file '{filename_cli}' of size {filesize_cli}")
+        # Check bounds
+        h, w = depth_frame.shape[:2]
+        if not (0 <= center_x < w and 0 <= center_y < h):
+            print(f"[Calc Pos Cam] Center pixel ({center_x},{center_y}) out of bounds ({w}x{h}).")
+            return None
 
-                # 接收文件
-                received_payload = b""
-                while len(received_payload) < filesize_cli:
-                    chunk = conn.recv(4096)
-                    if not chunk: break
-                    received_payload += chunk
+        depth_mm = camera_client.get_depth_for_color_pixel(depth_frame=depth_frame, color_point=[center_x, center_y])
 
-                print(f"[MockServer] Received {len(received_payload)} bytes for '{filename_cli}'.")
-                # 不保存，直接回传一个假的回应
+        if depth_mm is None or depth_mm <= 10:  # Min depth check
+            print(f"[Calc Pos Cam] Error: Invalid depth ({depth_mm}mm) at pixel ({center_x}, {center_y}).")
+            return None
 
-                # 准备JSON回应
-                response_json = {"action": "grasp", "target": 1, "detail": "Mock server response"}
-                response_json_bytes = json.dumps(response_json).encode()
+        real_z = depth_mm / 1000.0  # meters
+        real_x = (center_x - ppx) * real_z / fx
+        real_y = (center_y - ppy) * real_z / fy
 
-                # 准备一个假的音频文件回应 (可以是静音或测试音)
-                mock_response_audio_path = "mock_server_response.wav"
-                sr_mock = 22050
-                duration_mock = 1
-                frequency_mock = 440
-                t_mock = np.linspace(0, duration_mock, int(sr_mock * duration_mock), False)
-                audio_data_mock = 0.5 * np.sin(2 * np.pi * frequency_mock * t_mock)
-                sf.write(mock_response_audio_path, audio_data_mock, sr_mock)
-
-                response_audio_filesize = os.path.getsize(mock_response_audio_path)
-
-                # 发送JSON长度
-                conn.sendall(len(response_json_bytes).to_bytes(4, 'big'))
-                # 发送JSON
-                conn.sendall(response_json_bytes)
-                print(f"[MockServer] Sent JSON: {response_json}")
-
-                # 发送音频大小
-                conn.sendall(response_audio_filesize.to_bytes(4, 'big'))
-                # 发送音频内容
-                with open(mock_response_audio_path, 'rb') as f_audio_resp:
-                    while True:
-                        bytes_to_send = f_audio_resp.read(4096)
-                        if not bytes_to_send: break
-                        conn.sendall(bytes_to_send)
-                print(f"[MockServer] Sent mock audio response '{mock_response_audio_path}'.")
-                os.remove(mock_response_audio_path)  # 清理
+        pos_cam_m = [real_x, real_y, real_z]
+        print(f"[Calc Pos Cam] Position in Camera Frame (meters): {pos_cam_m}")
+        return pos_cam_m
+    except Exception as e:
+        print(f"[Calc Pos Cam] Error calculating 3D position: {e}")
+        traceback.print_exc()
+        return None
 
 
-    server_thread = threading.Thread(target=mock_server, args=(SERVER_IP, SERVER_PORT))
-    server_thread.daemon = True
-    server_thread.start()
-    time.sleep(1)  # 等待服务器启动
+def transform_camera_to_base(pos_cam_m, arm_choice, robot_controllers, calibration_matrices):
+    """Transforms a point from camera frame to the arm's base frame (returns mm)."""
+    # ...(Implementation from previous response)...
+    print(f"[Transform] Transforming camera point {pos_cam_m} (m) to base frame for {arm_choice} arm.")
+    controller = robot_controllers.get(arm_choice)
+    T_end_to_camera_list = calibration_matrices.get(arm_choice)
 
-    while True:
-        try:
-            if keyboard.is_pressed('x'):
-                if not is_recording:
-                    start_recording_thread()
-                while keyboard.is_pressed('x'): pass  # 等待按键释放
-            elif keyboard.is_pressed('y'):
-                if is_recording:
-                    saved_file = stop_recording_and_save()
-                    if saved_file:
-                        print(f"Audio saved: {saved_file}, now sending...")
+    if not controller: print(f"[Transform] Error: Controller for '{arm_choice}' not found."); return None
+    if not T_end_to_camera_list: print(
+        f"[Transform] Error: Calibration matrix for '{arm_choice}' not found."); return None
+
+    try:
+        T_end_to_camera = np.array(T_end_to_camera_list)
+        if T_end_to_camera.shape != (4, 4):
+            print(f"[Transform] Error: Invalid shape for calibration matrix {arm_choice}: {T_end_to_camera.shape}");
+            return None
+
+        current_tcp_pose_base_list = controller.getTCPPose()
+        if not current_tcp_pose_base_list or len(current_tcp_pose_base_list) != 6:
+            print(
+                f"[Transform] Error: Failed to get valid TCP pose for {arm_choice}. Got: {current_tcp_pose_base_list}");
+            return None
+        print(f"[Transform] Current TCP Pose (Base, mm/deg): {current_tcp_pose_base_list}")
+
+        T_base_to_end = create_transformation_matrix(current_tcp_pose_base_list[:3], current_tcp_pose_base_list[3:])
+
+        T_base_to_camera = T_base_to_end @ T_end_to_camera
+
+        pos_base_m = transform_point(pos_cam_m, T_base_to_camera)  # Input point is meters
+        pos_base_mm = [p * 1000.0 for p in pos_base_m]  # Convert result back to mm
+
+        print(f"[Transform] Point in Base Frame (mm): {pos_base_mm}")
+        return pos_base_mm
+
+    except Exception as e:
+        print(f"[Transform] Error during transformation: {e}")
+        traceback.print_exc()
+        return None
 
 
-                        # 将网络操作放入线程以避免阻塞键盘监听
-                        def process_in_thread(filepath):
-                            recv_audio, recv_json = send_audio_and_receive_response(filepath)
-                            if os.path.exists(filepath): os.remove(filepath)  # 清理发送的临时文件
-                            if recv_audio:
-                                play_audio_file(recv_audio)
-                                if os.path.exists(recv_audio): os.remove(recv_audio)  # 清理接收的临时文件
-                            if recv_json:
-                                handle_command_json(recv_json)
+# --- Grasp Calculation and Execution (Remain the same as previous response) ---
+def calculate_grasp_poses(object_base_coordinates_mm, arm_to_use, object_orientation_rpy_deg=None):
+    """Calculates the sequence of TCP poses (relative to base) for grasping."""
+    # ...(Implementation from previous response)...
+    print(
+        f"[Calculate Grasp] Input Coords (mm): {object_base_coordinates_mm}, Arm: {arm_to_use}, Object RPY: {object_orientation_rpy_deg}")
+    if arm_to_use == "left":
+        grasp_rpy = list(DEFAULT_LEFT_GRASP_RPY)
+    else:
+        grasp_rpy = list(DEFAULT_RIGHT_GRASP_RPY)
+    if object_orientation_rpy_deg and len(object_orientation_rpy_deg) == 3:
+        grasp_rpy[2] = (grasp_rpy[2] + object_orientation_rpy_deg[2]) % 360
+    grasp_pose_xyz = [float(c) for c in object_base_coordinates_mm]
+    _grasp_pose = grasp_pose_xyz + grasp_rpy
+    _pre_grasp_pose = list(_grasp_pose);
+    _pre_grasp_pose[2] += PRE_GRASP_OFFSET_Z_MM
+    _post_grasp_pose = list(_grasp_pose);
+    _post_grasp_pose[2] += POST_GRASP_LIFT_Z_MM
+    print(f"[Calculate Grasp] Pre: {_pre_grasp_pose}, Grasp: {_grasp_pose}, Post: {_post_grasp_pose}")
+    return _pre_grasp_pose, _grasp_pose, _post_grasp_pose
 
 
-                        threading.Thread(target=process_in_thread, args=(saved_file,)).start()
-                while keyboard.is_pressed('y'): pass
-            elif keyboard.is_pressed('a'):
-                cancel_recording()
-                while keyboard.is_pressed('a'): pass
-            elif keyboard.is_pressed('q'):
-                print("Exiting test.")
-                break
-            time.sleep(0.05)
-        except Exception as e:
-            print(f"Error in test loop: {e}")
-            # keyboard 库在某些环境下可能需要特殊权限，或者在非主线程中使用会有问题
-            break
+def execute_grasp_sequence(arm_choice, pre_grasp_pose, grasp_pose, post_grasp_pose, robot_controllers):
+    """Executes the calculated grasp sequence."""
+    # ...(Implementation from previous response, including move_func selection and error checks)...
+    print(f"[Execute Grasp] Starting sequence with {arm_choice} arm.")
+    controller = robot_controllers.get(arm_choice)
+    if not controller: print(f"[Execute Grasp] Error: Controller for '{arm_choice}' not found."); return False
 
-    if is_recording:  # 确保退出时停止录音
-        stop_recording_and_save()
+    if arm_choice == "left":
+        move_func, open_gripper_func, close_gripper_func = getattr(controller, 'move_robot', None), getattr(controller,
+                                                                                                            'open_gripper',
+                                                                                                            None), getattr(
+            controller, 'close_gripper', None)
+    elif arm_choice == "right":
+        move_func, open_gripper_func, close_gripper_func = getattr(controller, 'move_right_robot', None), getattr(
+            controller, 'open_gripper', None), getattr(controller, 'close_gripper', None)
+    else:
+        print(f"[Execute Grasp] Error: Invalid arm_choice '{arm_choice}'."); return False
+    if not all([move_func, open_gripper_func, close_gripper_func]): print(
+        f"[Execute Grasp] Error: Controller instance for '{arm_choice}' missing methods."); return False
 
-    print("Test finished.")
+    try:
+        print(f"  [{arm_choice.upper()}] Opening gripper...");
+        open_gripper_func(speed=DEFAULT_GRIPPER_SPEED, force=DEFAULT_GRIPPER_FORCE, wait=True);
+        time.sleep(0.5)
+        print(f"  [{arm_choice.upper()}] Moving to Pre-Grasp...");
+        success = move_func(list(pre_grasp_pose), speed=DEFAULT_MOVE_SPEED, block=True);
+        time.sleep(0.2)
+        if not success: print(f"  [{arm_choice.upper()}] Error: Failed Pre-Grasp."); return False
+        print(f"  [{arm_choice.upper()}] Moving to Grasp...");
+        success = move_func(list(grasp_pose), speed=DEFAULT_GRASP_SPEED, block=True);
+        time.sleep(0.5)
+        if not success: print(
+            f"  [{arm_choice.upper()}] Error: Failed Grasp move."); return False  # Decide recovery later
+        print(f"  [{arm_choice.upper()}] Closing gripper...");
+        close_gripper_func(speed=DEFAULT_GRIPPER_SPEED, force=DEFAULT_GRIPPER_FORCE, wait=True);
+        time.sleep(1.0)
+        # Optional Grasp Check Here
+        print(f"  [{arm_choice.upper()}] Moving to Post-Grasp...");
+        success = move_func(list(post_grasp_pose), speed=DEFAULT_MOVE_SPEED, block=True)
+        if not success: print(f"  [{arm_choice.upper()}] Warning: Failed Post-Grasp move.")  # Continue anyway?
+        print(f"[Execute Grasp] Sequence finished.")
+        return True  # Assume success if sequence completes
+    except Exception as e_exec:
+        print(f"[Execute Grasp] Unexpected error: {e_exec}"); traceback.print_exc(); return False
+
+
+# --- Main Interaction Orchestration ---
+def initiate_grasp_from_command(command_json, robot_controllers, camera_clients, models, calibration_matrices):
+    """Orchestrates the vision-based grasp sequence."""
+    # ...(Implementation from previous response, calling the updated functions)...
+    action = command_json.get("action")
+    if action != "grasp": print(f"[Initiate Grasp] Non-grasp action '{action}'. Skipping."); return False
+    target_details = command_json.get("target");
+    if not isinstance(target_details, dict): print(
+        f"[Initiate Grasp] Error: 'target' invalid: {target_details}"); return False
+
+    object_id = target_details.get("id", "unknown_object")
+    approx_base_coords_mm = target_details.get("base_coordinates_mm")
+    arm_choice = target_details.get("arm_choice")
+
+    # Validate inputs
+    if approx_base_coords_mm is None or not (
+            isinstance(approx_base_coords_mm, list) and len(approx_base_coords_mm) == 3): print(
+        f"[Initiate Grasp] Error: Invalid 'base_coordinates_mm'"); return False
+    if arm_choice not in ["left", "right"]: print(f"[Initiate Grasp] Error: Invalid 'arm_choice'"); return False
+    controller = robot_controllers.get(arm_choice)
+    yolo_model = models.get(object_id) or models.get('default')
+    camera_client = camera_clients.get(f"{arm_choice}_hand")  # Assumes hand camera needed
+    calib_matrix = calibration_matrices.get(arm_choice)
+    if controller is None:
+        print(f"[Initiate Grasp] Error: Controller not available for arm '{arm_choice}'.")
+        return False
+    if yolo_model is None:
+        print(f"[Initiate Grasp] Error: Required YOLO model ('{object_id}' or 'default') not loaded.")
+        return False
+    if camera_client is None:
+        return False
+    # Check NumPy array specifically for None
+    if calib_matrix is None:
+        print(f"[Initiate Grasp] Error: Calibration matrix not available for arm '{arm_choice}'.")
+        return False
+    print(f"[Initiate Grasp] Processing grasp for '{object_id}' near {approx_base_coords_mm}mm with {arm_choice} arm.")
+
+    grasp_successful = False
+    for attempt in range(MAX_OBSERVATION_RETRIES):
+        print(f"\n[Initiate Grasp] Attempt {attempt + 1}/{MAX_OBSERVATION_RETRIES}")
+        # if not move_arm_to_observe(arm_choice, approx_base_coords_mm, robot_controllers): print(
+        #     "Failed move to observe. Retrying..."); time.sleep(0.5); continue
+        detection_box, _, depth_frame = capture_and_detect(object_id, camera_client, yolo_model)
+        if detection_box is None or depth_frame is None: print("Failed detect. Retrying..."); time.sleep(0.5); continue
+        pos_cam_m = calculate_3d_position_camera_frame(detection_box, depth_frame, camera_client)
+        if pos_cam_m is None: print("Failed calc cam pos. Retrying..."); time.sleep(0.5); continue
+        precise_base_coords_mm = transform_camera_to_base(pos_cam_m, arm_choice, robot_controllers,
+                                                          calibration_matrices)
+        if precise_base_coords_mm is None: print("Failed transform to base. Retrying..."); time.sleep(0.5); continue
+
+        # Use precise coords now
+        object_orientation_rpy_deg = None  # TODO: Get from vision if possible
+        poses = calculate_grasp_poses(precise_base_coords_mm, arm_choice, object_orientation_rpy_deg)
+        pre_grasp_pose, grasp_pose, post_grasp_pose = poses
+        if grasp_pose is None: print("Failed calc grasp poses. Stopping."); break
+
+        grasp_successful = execute_grasp_sequence(arm_choice, pre_grasp_pose, grasp_pose, post_grasp_pose,
+                                                  robot_controllers)
+        if grasp_successful:
+            print("Grasp success!"); break
+        else:
+            print(f"Grasp sequence failed attempt {attempt + 1}. Retrying..."); time.sleep(1.0)
+
+    if not grasp_successful: print(f"Grasp failed after {MAX_OBSERVATION_RETRIES} attempts.")
+    return grasp_successful
+
+
+# --- Main JSON Handler ---
+def handle_command_json(command_json, robot_controllers, camera_clients, models, calibration_matrices):
+    """Handles JSON commands, calling the appropriate action handler."""
+    # ...(Implementation from previous response, passing all args to initiate_grasp)...
+    if not isinstance(command_json, dict): print(f"[Handle Command] Invalid JSON: {command_json}"); return
+    print(f"[Handle Command] Received: {command_json}")
+    action = command_json.get("action")
+
+    if action == "grasp":
+        initiate_grasp_from_command(command_json, robot_controllers, camera_clients, models, calibration_matrices)
+    elif action == "play_message":
+        message = command_json.get("message", "No message.")
+        print(f"[Handle Command] Server message: {message}")
+    else:
+        print(f"[Handle Command] Unknown action: '{action}'")
+
+# --- How this module is used ---
+# This module does not run on its own.
+# It is imported by main_controller.py (or similar).
+# The main controller:
+# 1. Initializes Pygame, robot controllers, cameras, YOLO models, calibration data.
+# 2. Runs the main event loop (using ui.py for input/display).
+# 3. When in VISION mode and the 'stop record' button is pressed:
+#    - Calls vision_interaction.stop_recording_and_save()
+#    - Starts a thread running DualArmController._threaded_process_vision_audio(saved_audio_path)
+# 4. DualArmController._threaded_process_vision_audio:
+#    - Calls vision_interaction.send_audio_and_receive_response()
+#    - If JSON is received, prepares dictionaries for controllers, cameras, models, calibration.
+#    - Calls vision_interaction.handle_command_json(...) passing these dictionaries.
+#    - Calls vision_interaction.play_audio_file() if audio response received.

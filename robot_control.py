@@ -10,13 +10,9 @@ from config import (TARGET_RESET_RPY_LEFT, TARGET_RESET_RPY_RIGHT,
                     MODE_XYZ, MODE_RPY, MODE_VISION, MODE_RESET)
 
 # 假设 desire_left_pose 和 desire_right_pose 在 CPS.py 中
-try:
-    from CPS import desire_left_pose, desire_right_pose
-except ImportError:
-    print("警告: 未能从 CPS.py 导入 desire_left_pose 或 desire_right_pose。回正功能可能受影响。")
-    # 可以定义占位符函数以避免运行时错误，但功能会不正确
-    def desire_left_pose(rpy_array): return rpy_array # 占位符
-    def desire_right_pose(rpy_array): return rpy_array # 占位符
+
+from CPS import desire_left_pose, desire_right_pose
+
 
 
 def initialize_robot(controller, arm_name):
