@@ -105,22 +105,23 @@ controls:
   mode_switch_button: { type: button, index: 8 } # Start 按钮
 
   # 左臂回正按钮
-  reset_left_arm_default_rpy: { type: button, index: 0 }
-  reset_left_arm_forward_rpy: { type: button, index: 1 }
-  reset_left_arm_backward_rpy: { type: button, index: 2 }
-  reset_left_arm_to_left_rpy: { type: button, index: 3 }
-  reset_left_arm_to_right_rpy: { type: button, index: 4 }
-  reset_left_arm_up_rpy: { type: button, index: 6 }
-  reset_left_arm_down_rpy: { type: button, index: 9 }
+
+  reset_left_arm_default_rpy: { type: axis, index: 2, threshold: 0.1, direction: 1 } # LT
+  reset_left_arm_forward_rpy: { type: hat, index: 0, axis: y, direction: -1 }
+  reset_left_arm_backward_rpy: { type: hat, index: 0, axis: y, direction: 1 }
+  reset_left_arm_to_left_rpy: { type: hat, index: 0, axis: x, direction: 1 }
+  reset_left_arm_to_right_rpy: { type: hat, index: 0, axis: x, direction: -1 }
+  reset_left_arm_up_rpy:  { type: button, index: 4 } # LB
+  reset_left_arm_down_rpy:  { type: axis, index: 2, threshold: 0.1, direction: 1 } # LT
 
   # 右臂回正按钮
-  reset_right_arm_default_rpy: { type: button, index: 10 }
-  reset_right_arm_forward_rpy: { type: button, index: 11 }
-  reset_right_arm_backward_rpy: { type: button, index: 12 }
-  reset_right_arm_to_left_rpy: { type: button, index: 13 }
-  reset_right_arm_to_right_rpy: { type: button, index: 14 }
+  reset_right_arm_default_rpy: { type: axis, index: 5, threshold: 0.1, direction: 1 } # RT
+  reset_right_arm_forward_rpy: { type: button, index: 3 }
+  reset_right_arm_backward_rpy: { type: button, index: 0 }
+  reset_right_arm_to_left_rpy: { type: button, index: 2 }
+  reset_right_arm_to_right_rpy: { type: button, index: 1 }
   reset_right_arm_up_rpy: { type: button, index: 5 }
-  reset_right_arm_down_rpy: { type: button, index: 7 }
+  reset_right_arm_down_rpy: { type: axis, index: 5, threshold: 0.1, direction: 1 } # RT
 
 
 # 速度和通用设置

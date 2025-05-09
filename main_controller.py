@@ -616,103 +616,193 @@ class DualArmController:
                                        action_description: str,
                                        success_sound_key: Optional[str] = None,
                                        fail_sound_key: Optional[str] = None):
-        robot_controller = self.controller_left if arm_side == 'left' else self.controller_right
+
+        robot_controller: Optional[CPSClient] = self.controller_left if arm_side == 'left' else self.controller_right
         is_init_ok = self.left_init_ok if arm_side == 'left' else self.right_init_ok
 
         final_success_sound = success_sound_key if success_sound_key else 'action_success_general'
         final_fail_sound = fail_sound_key if fail_sound_key else 'action_fail_general'
 
         if not is_init_ok or not robot_controller:
-            msg = f"{action_description} RPY设置失败: 机器人未初始化"
-            print(msg);
-            self.ui_manager.play_sound(final_fail_sound);
-            self.ui_manager.update_status_message(msg)
+            msg = f"{action_description} RPY设置失败: 机器人未初始化或控制器无效"
+            print(msg)
+            if self.ui_manager: self.ui_manager.play_sound(final_fail_sound)
+            if self.ui_manager: self.ui_manager.update_status_message(msg)
             return
 
-        rpy_array = self.reset_rpy_poses_config.get(pose_key_in_yaml)
-        if rpy_array is None or not isinstance(rpy_array, list) or len(rpy_array) != 3:
+        target_rpy_array = self.reset_rpy_poses_config.get(pose_key_in_yaml)
+        if target_rpy_array is None or not isinstance(target_rpy_array, list) or len(target_rpy_array) != 3:
             msg = f"{action_description} RPY设置失败: '{pose_key_in_yaml}' RPY姿态定义无效或缺失"
-            print(msg);
-            self.ui_manager.play_sound(final_fail_sound);
-            self.ui_manager.update_status_message(msg)
+            print(msg)
+            if self.ui_manager: self.ui_manager.play_sound(final_fail_sound)
+            if self.ui_manager: self.ui_manager.update_status_message(msg)
             return
 
-        self.ui_manager.update_status_message(f"{action_description} RPY设置中 ({rpy_array})...")
-        success = False
-        try:
-            # Parameters for desire_..._pose should come from self.reset_rpy_... attributes
-            # which were loaded from YAML settings or have defaults.
-            current_speed = self.reset_rpy_speed
-            current_acc = self.reset_rpy_acc
-            # current_arot = self.reset_rpy_arot # if desire_..._pose uses it
-            # current_t = self.reset_rpy_t_interval # if desire_..._pose uses it
+        self.ui_manager.update_status_message(f"{action_description} RPY设置中 ({target_rpy_array})...")
 
-            print(f"  尝试调用RPY设置: arm={arm_side}, rpy={rpy_array}, speed={current_speed}, acc={current_acc}")
+        # 根据手臂选择对应的 desire_pose_func 和 move_func_name
+        desire_function_for_arm = desire_left_pose if arm_side == 'left' else desire_right_pose
 
-            if arm_side == 'left':
-                # Adjust this call to match the actual signature of your desire_left_pose function
-                # It might need the robot_controller object if it's not a method of it.
-                # Example: desire_left_pose(robot_controller, rpy_array=rpy_array, speed=current_speed, acc=current_acc)
-                desire_left_pose(rpy_array=rpy_array)  # Add speed, acc, etc. if required by your function
+        # 使用您指定的特定方法名
+        if arm_side == 'left':
+            robot_move_method_name = 'move_robot'
+        else:  # arm_side == 'right'
+            robot_move_method_name = 'move_right_robot'
 
-            else:  # arm_side == 'right'
-                desire_right_pose(rpy_array=rpy_array)  # Add speed, acc, etc. if required
+        arm_name_for_function = arm_side.capitalize() + "臂"
 
-            success = True  # Assume success if no exception. Modify if your functions return status.
-        except Exception as e:
-            print(f"{action_description} RPY设置时发生错误: {e}");
-            traceback.print_exc();
-            success = False
+        print(
+            f"  调用 attempt_reset_arm 进行RPY设置: arm={arm_name_for_function}, target_rpy={target_rpy_array}, speed={self.reset_rpy_speed}, move_func='{robot_move_method_name}'")
+
+        # 调用您提供的、可工作的 attempt_reset_arm 函数
+        # 注意：如果 attempt_reset_arm 需要 acc 参数，您需要在这里传递 self.reset_rpy_acc
+        # 并确保 attempt_reset_arm 函数定义也接受并使用它。
+        # 假设当前 attempt_reset_arm 的签名与您之前提供的一致（即不强制要求 acc）。
+        success = attempt_reset_arm(
+            controller=robot_controller,
+            arm_name=arm_name_for_function,
+            target_rpy=target_rpy_array,
+            reset_speed=self.reset_rpy_speed,  # 使用为RPY设置的速度
+            desire_pose_func=desire_function_for_arm,
+            move_func_name=robot_move_method_name,  # 使用 'move_left_robot' 或 'move_right_robot'
+            sound_player=self.ui_manager.play_sound if self.ui_manager else None,
+            success_sound=final_success_sound,  # 正确传递处理后的声音key
+            fail_sound=final_fail_sound  # 正确传递处理后的声音key
+        )
 
         if success:
-            self.ui_manager.play_sound(final_success_sound)
             self.ui_manager.update_status_message(f"{action_description} RPY设置成功")
         else:
-            self.ui_manager.play_sound(final_fail_sound)
-            self.ui_manager.update_status_message(f"{action_description} RPY设置失败")
+            # attempt_reset_arm 内部会打印失败信息，这里只更新UI
+            self.ui_manager.update_status_message(f"{action_description} RPY设置失败 (详情请查看控制台)")
 
+    # ... (所有 attempt_reset_left/right_arm_..._rpy 方法保持不变) ...
     def attempt_reset_left_arm_default_rpy(self):
-        self._attempt_reset_rpy_orientation('left', 'left_default', "左臂默认RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='left',
+            pose_key_in_yaml='left_default',
+            action_description="左臂默认RPY",
+            success_sound_key='left_reset_success',  # 统一左臂成功语音
+            fail_sound_key='left_reset_fail'  # 统一左臂失败语音
+        )
 
     def attempt_reset_left_arm_forward_rpy(self):
-        self._attempt_reset_rpy_orientation('left', 'left_forward', "左臂向前RPY", 'left_reset_rpy_forward_success')
+        self._attempt_reset_rpy_orientation(
+            arm_side='left',
+            pose_key_in_yaml='left_forward',
+            action_description="左臂向前RPY",
+            success_sound_key='left_reset_success',
+            fail_sound_key='left_reset_fail'
+        )
 
     def attempt_reset_left_arm_backward_rpy(self):
-        self._attempt_reset_rpy_orientation('left', 'left_backward', "左臂向后RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='left',
+            pose_key_in_yaml='left_backward',
+            action_description="左臂向后RPY",
+            success_sound_key='left_reset_success',
+            fail_sound_key='left_reset_fail'
+        )
 
     def attempt_reset_left_arm_to_left_rpy(self):
-        self._attempt_reset_rpy_orientation('left', 'left_to_left', "左臂向左RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='left',
+            pose_key_in_yaml='left_to_left',
+            action_description="左臂向左RPY",
+            success_sound_key='left_reset_success',
+            fail_sound_key='left_reset_fail'
+        )
 
     def attempt_reset_left_arm_to_right_rpy(self):
-        self._attempt_reset_rpy_orientation('left', 'left_to_right', "左臂向右RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='left',
+            pose_key_in_yaml='left_to_right',
+            action_description="左臂向右RPY",
+            success_sound_key='left_reset_success',
+            fail_sound_key='left_reset_fail'
+        )
 
     def attempt_reset_left_arm_up_rpy(self):
-        self._attempt_reset_rpy_orientation('left', 'left_up', "左臂向上RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='left',
+            pose_key_in_yaml='left_up',
+            action_description="左臂向上RPY",
+            success_sound_key='left_reset_success',
+            fail_sound_key='left_reset_fail'
+        )
 
     def attempt_reset_left_arm_down_rpy(self):
-        self._attempt_reset_rpy_orientation('left', 'left_down', "左臂向下RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='left',
+            pose_key_in_yaml='left_down',
+            action_description="左臂向下RPY",
+            success_sound_key='left_reset_success',
+            fail_sound_key='left_reset_fail'
+        )
 
+    # --- 右臂 ---
     def attempt_reset_right_arm_default_rpy(self):
-        self._attempt_reset_rpy_orientation('right', 'right_default', "右臂默认RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='right',
+            pose_key_in_yaml='right_default',
+            action_description="右臂默认RPY",
+            success_sound_key='right_reset_success',  # 统一右臂成功语音
+            fail_sound_key='right_reset_fail'  # 统一右臂失败语音
+        )
 
     def attempt_reset_right_arm_forward_rpy(self):
-        self._attempt_reset_rpy_orientation('right', 'right_forward', "右臂向前RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='right',
+            pose_key_in_yaml='right_forward',
+            action_description="右臂向前RPY",
+            success_sound_key='right_reset_success',
+            fail_sound_key='right_reset_fail'
+        )
 
     def attempt_reset_right_arm_backward_rpy(self):
-        self._attempt_reset_rpy_orientation('right', 'right_backward', "右臂向后RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='right',
+            pose_key_in_yaml='right_backward',
+            action_description="右臂向后RPY",
+            success_sound_key='right_reset_success',
+            fail_sound_key='right_reset_fail'
+        )
 
     def attempt_reset_right_arm_to_left_rpy(self):
-        self._attempt_reset_rpy_orientation('right', 'right_to_left', "右臂向左RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='right',
+            pose_key_in_yaml='right_to_left',
+            action_description="右臂向左RPY",
+            success_sound_key='right_reset_success',
+            fail_sound_key='right_reset_fail'
+        )
 
     def attempt_reset_right_arm_to_right_rpy(self):
-        self._attempt_reset_rpy_orientation('right', 'right_to_right', "右臂向右RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='right',
+            pose_key_in_yaml='right_to_right',
+            action_description="右臂向右RPY",
+            success_sound_key='right_reset_success',
+            fail_sound_key='right_reset_fail'
+        )
 
     def attempt_reset_right_arm_up_rpy(self):
-        self._attempt_reset_rpy_orientation('right', 'right_up', "右臂向上RPY")
+        self._attempt_reset_rpy_orientation(
+            arm_side='right',
+            pose_key_in_yaml='right_up',
+            action_description="右臂向上RPY",
+            success_sound_key='right_reset_success',
+            fail_sound_key='right_reset_fail'
+        )
 
     def attempt_reset_right_arm_down_rpy(self):
-        self._attempt_reset_rpy_orientation('right', 'right_down', "右臂向下RPY")
-
+        self._attempt_reset_rpy_orientation(
+            arm_side='right',
+            pose_key_in_yaml='right_down',
+            action_description="右臂向下RPY",
+            success_sound_key='right_reset_success',
+            fail_sound_key='right_reset_fail'
+        )
     def _calculate_speed_commands(self) -> Tuple[np.ndarray, np.ndarray]:
         speed_left_cmd, speed_right_cmd = np.zeros(6), np.zeros(6)
         if not self.ui_manager.joystick: return speed_left_cmd, speed_right_cmd
