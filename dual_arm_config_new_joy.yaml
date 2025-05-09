@@ -54,42 +54,42 @@ controls:
   xyz_left_arm_x_neg: { type: hat, index: 0, axis: y, direction: 1 }
   xyz_left_arm_y_pos: { type: hat, index: 0, axis: x, direction: 1 }
   xyz_left_arm_y_neg: { type: hat, index: 0, axis: x, direction: -1 }
-  xyz_left_arm_z_pos: { type: button, index: 4 } # LB
-  xyz_left_arm_z_neg: { type: axis, index: 2, threshold: 0.1, direction: 1 } # LT
+  xyz_left_arm_z_pos: { type: button, index: 6 } # LB
+  xyz_left_arm_z_neg: { type: axis, index: 5, threshold: 0.1, direction: 1 } # LT
 
-  xyz_right_arm_x_pos:  { type: button, index: 3 } # Y
+  xyz_right_arm_x_pos:  { type: button, index: 4 } # Y
   xyz_right_arm_x_neg: { type: button, index: 0 } # A
-  xyz_right_arm_y_pos: { type: button, index: 2 } # X
+  xyz_right_arm_y_pos: { type: button, index: 3 } # X
   xyz_right_arm_y_neg: { type: button, index: 1 } # B
-  xyz_right_arm_z_pos: { type: button, index: 5 } # RB
-  xyz_right_arm_z_neg: { type: axis, index: 5, threshold: 0.1, direction: 1 } # RT
+  xyz_right_arm_z_pos: { type: button, index: 7 } # RB
+  xyz_right_arm_z_neg: { type: axis, index: 4, threshold: 0.1, direction: 1 } # RT
 
   rpy_left_arm_roll_pos: { type: hat, index: 0, axis: x, direction: 1 }
   rpy_left_arm_roll_neg: { type: hat, index: 0, axis: x, direction: -1 }
   rpy_left_arm_pitch_pos: { type: hat, index: 0, axis: y, direction: -1 }
   rpy_left_arm_pitch_neg: { type: hat, index: 0, axis: y, direction: 1 }
-  rpy_left_arm_yaw_pos: { type: button, index: 4 } # LB
-  rpy_left_arm_yaw_neg: { type: axis, index: 2, threshold: 0.1, direction: 1 } # LT
+  rpy_left_arm_yaw_pos: { type: button, index: 6 } # LB
+  rpy_left_arm_yaw_neg: { type: axis, index: 5, threshold: 0.1, direction: 1 } # LT
 
-  rpy_right_arm_roll_pos: { type: button, index: 1 } # B
-  rpy_right_arm_roll_neg: { type: button, index: 2 } # X
-  rpy_right_arm_pitch_pos: { type: button, index: 0 } # A
-  rpy_right_arm_pitch_neg: { type: button, index: 3 } # Y
-  rpy_right_arm_yaw_pos: { type: button, index: 5 } # RB
-  rpy_right_arm_yaw_neg: { type: axis, index: 5, threshold: 0.1, direction: 1 } # RT
+  rpy_right_arm_roll_pos: { type: button, index: 1 } # Y
+  rpy_right_arm_roll_neg: { type: button, index: 3 } # A
+  rpy_right_arm_pitch_pos: { type: button, index: 0 } # X
+  rpy_right_arm_pitch_neg: { type: button, index: 4 } # B
+  rpy_right_arm_yaw_pos: { type: button, index: 7 } # RB
+  rpy_right_arm_yaw_neg: { type: axis, index: 4, threshold: 0.1, direction: 1 } # RT
 
   # --- Shared Controls (All Modes) ---
-  gripper_toggle_left: { type: button, index: 9 }  # R3
-  gripper_toggle_right: { type: button, index: 10 } # Guide (可能无效!)
-  speed_decrease: { type: button, index: 6 } # Back 按钮 减速
-  speed_increase_alt: { type: button, index: 7 } # Back 按钮 减速
+  gripper_toggle_left: { type: button, index: 13 }  # R3
+  gripper_toggle_right: { type: button, index: 14 } # Guide (可能无效!)
+  speed_decrease: { type: button, index: 10 } # Back 按钮 减速
+  speed_increase_alt: { type: button, index: 11 } # Back 按钮 减速
 
   # --- Mode Switching ---
-  mode_switch_button: { type: button, index: 8 } # Start 按钮
+  mode_switch_button: { type: button, index: 12 } # Start 按钮
 
   # --- 新增: 回正模式控制 ---
   # !请根据你的手柄修改下面的 index!
-  reset_left_arm: { type: button, index: 2 } # 例如: X 按钮
+  reset_left_arm: { type: button, index: 3 } # 例如: X 按钮
   reset_right_arm: { type: button, index: 1 } # 例如: B 按钮
 
 

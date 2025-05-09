@@ -840,7 +840,7 @@ class CPSClient:
 
                     # 可以增加连续失败计数器来提前退出
 
-                time.sleep(0.5)  # 轮询间隔
+                time.sleep(1)  # 轮询间隔
 
             if not activation_success:
                 print("夹爪激活超时或失败!")
