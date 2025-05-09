@@ -89,9 +89,15 @@ controls:
 
   # --- 新增: 回正模式控制 ---
   # !请根据你的手柄修改下面的 index!
-  reset_left_arm: { type: button, index: 3 } # 例如: X 按钮
-  reset_right_arm: { type: button, index: 1 } # 例如: B 按钮
+  # !请根据你的手柄修改下面的 index!
+  reset_left_arm_default: { type: button, index: 2 }  # 例如: X 按钮 (原 reset_left_arm)
+  reset_right_arm_default: { type: button, index: 1 } # 例如: B 按钮 (原 reset_right_arm)
 
+  # --- 新增的回正按钮 ---
+  reset_left_arm_standing: { type: button, index: 11 } # 示例: 手柄上的另一个按钮
+  reset_right_arm_standing: { type: button, index: 12 } # 示例: 手柄上的另一个按钮
+  reset_left_arm_work: { type: button, index: 13 }
+  reset_right_arm_work: { type: button, index: 14 }
 
 # 速度和通用设置
 settings:

@@ -18,7 +18,24 @@ setup:
   calibration_files:
     left: "./calibration_yaml/config_left.yaml"  # 左臂手眼标定文件
     right: "./calibration_yaml/config_left.yaml" # 右臂手眼标定文件
+reset_rpy_poses: # Renamed for clarity
+  # --- 左臂 RPY 姿态 ---
+  left_default: [180, 0, 180]          # 默认/Home RPY
+  left_forward: [180, 0, 180]       # 示例: 工具Z轴向前 (Pitch 90)
+  left_backward: [180, 0, 180]       # 示例: 工具Z轴向后 (Pitch -90)
+  left_to_left: [180, 0, 180]      # 示例: 工具Z轴向左 (Yaw 90, from arm's perspective)
+  left_to_right: [180, 0, 180]      # 示例: 工具Z轴向右 (Yaw -90)
+  left_up: [180, 0, 180]     # 示例: 工具Z轴向上 (Roll -90, if Z is out from flange)
+  left_down: [180, 0, 180]       # 示例: 工具Z轴向下 (Roll 90)
 
+  # --- 右臂 RPY 姿态 ---
+  right_default: [180, 0, 0]
+  right_forward: [180, 0, 0]
+  right_backward: [180, 0, 0]
+  right_to_left: [180, 0, 0]
+  right_to_right: [180, 0, 0]
+  right_up: [180, 0, 0]
+  right_down: [180, 0, 0]
 # --- 新增: 音频文件路径映射 ---
 audio_files:
   # 将下面的路径修改为你实际的 .wav 文件路径
@@ -87,10 +104,23 @@ controls:
   # --- Mode Switching ---
   mode_switch_button: { type: button, index: 8 } # Start 按钮
 
-  # --- 新增: 回正模式控制 ---
-  # !请根据你的手柄修改下面的 index!
-  reset_left_arm: { type: button, index: 2 } # 例如: X 按钮
-  reset_right_arm: { type: button, index: 1 } # 例如: B 按钮
+  # 左臂回正按钮
+  reset_left_arm_default_rpy: { type: button, index: 0 }
+  reset_left_arm_forward_rpy: { type: button, index: 1 }
+  reset_left_arm_backward_rpy: { type: button, index: 2 }
+  reset_left_arm_to_left_rpy: { type: button, index: 3 }
+  reset_left_arm_to_right_rpy: { type: button, index: 4 }
+  reset_left_arm_up_rpy: { type: button, index: 6 }
+  reset_left_arm_down_rpy: { type: button, index: 9 }
+
+  # 右臂回正按钮
+  reset_right_arm_default_rpy: { type: button, index: 10 }
+  reset_right_arm_forward_rpy: { type: button, index: 11 }
+  reset_right_arm_backward_rpy: { type: button, index: 12 }
+  reset_right_arm_to_left_rpy: { type: button, index: 13 }
+  reset_right_arm_to_right_rpy: { type: button, index: 14 }
+  reset_right_arm_up_rpy: { type: button, index: 5 }
+  reset_right_arm_down_rpy: { type: button, index: 7 }
 
 
 # 速度和通用设置
