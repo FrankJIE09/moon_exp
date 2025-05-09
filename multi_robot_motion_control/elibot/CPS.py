@@ -599,8 +599,8 @@ class CPSClient:
         else:
             for idx, (ik_val, pos_val) in enumerate(zip(iK_joint, current_pos)):
                 diff = abs(ik_val - pos_val)
-                if diff > 90:
-                    raise Exception(f"警告：第 {idx + 1} 个关节角度差值 {diff:.2f} 度超过 90 度！")
+                if diff > 180:
+                    raise Exception(f"警告：第 {idx + 1} 个关节角度差值 {diff:.2f} 度超过 180 度！")
         print(f"开始使用计算出的关节角度移动: {iK_joint}")
         return self.moveByJoint(iK_joint, speed=speed, block=block)
 

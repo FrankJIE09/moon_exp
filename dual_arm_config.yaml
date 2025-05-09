@@ -21,19 +21,19 @@ setup:
 reset_rpy_poses: # Renamed for clarity
   # --- 左臂 RPY 姿态 ---
   left_default: [180, 0, 180]          # 默认/Home RPY
-  left_forward: [180, 0, 180]       # 示例: 工具Z轴向前 (Pitch 90)
-  left_backward: [180, 0, 180]       # 示例: 工具Z轴向后 (Pitch -90)
-  left_to_left: [180, 0, 180]      # 示例: 工具Z轴向左 (Yaw 90, from arm's perspective)
-  left_to_right: [180, 0, 180]      # 示例: 工具Z轴向右 (Yaw -90)
+  left_forward: [90, 0, -90]       # 手爪向前 相机向左
+  left_backward: [0, -90, 0]         # 手爪向前 相机向上
+  left_to_left: [90, 0, 180]      # 手爪向右 相机向前
+  left_to_right: [-90, -90, 0]    # 手爪向右 相机向上
   left_up: [180, 0, 180]     # 示例: 工具Z轴向上 (Roll -90, if Z is out from flange)
   left_down: [180, 0, 180]       # 示例: 工具Z轴向下 (Roll 90)
 
   # --- 右臂 RPY 姿态 ---
   right_default: [180, 0, 0]
-  right_forward: [180, 0, 0]
-  right_backward: [180, 0, 0]
-  right_to_left: [180, 0, 0]
-  right_to_right: [180, 0, 0]
+  right_forward: [-90, 0, -90]  # 手爪向前 相机向上
+  right_backward: [-90, 0, -90]
+  right_to_left: [-90, -90, 0]   # 手爪向左 相机向上
+  right_to_right: [-90, 0, 0]  # 手爪向左 相机向前
   right_up: [180, 0, 0]
   right_down: [180, 0, 0]
 # --- 新增: 音频文件路径映射 ---
@@ -116,10 +116,10 @@ controls:
 
   # 右臂回正按钮
   reset_right_arm_default_rpy: { type: axis, index: 5, threshold: 0.1, direction: 1 } # RT
-  reset_right_arm_forward_rpy: { type: button, index: 3 }
-  reset_right_arm_backward_rpy: { type: button, index: 0 }
-  reset_right_arm_to_left_rpy: { type: button, index: 2 }
-  reset_right_arm_to_right_rpy: { type: button, index: 1 }
+  reset_right_arm_forward_rpy: { type: button, index: 0 }
+  reset_right_arm_backward_rpy: { type: button, index: 3 }
+  reset_right_arm_to_left_rpy: { type: button, index: 1 }
+  reset_right_arm_to_right_rpy: { type: button, index: 2 }
   reset_right_arm_up_rpy: { type: button, index: 5 }
   reset_right_arm_down_rpy: { type: axis, index: 5, threshold: 0.1, direction: 1 } # RT
 
